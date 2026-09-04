@@ -1,0 +1,7 @@
+{
+  "name": "Real-Time Voice Trust Firewall",
+  "description": "Real-time AI voice trust firewall evaluating voice authenticity, conversation intent, and transaction context to authorize sensitive actions.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
