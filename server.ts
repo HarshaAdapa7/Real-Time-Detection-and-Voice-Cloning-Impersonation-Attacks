@@ -10,6 +10,14 @@ import {
   getEvaluationRecords,
   clearEvaluationRecords,
 } from "./src/db/db";
+import {
+  MULTILINGUAL_TEST_CASES,
+  CONTEXT_SWITCH_TEST_CASES,
+  SUPPORTED_LANGUAGES,
+} from "./src/data/multilingualTestDataset";
+import { evaluateTurnInContext } from "./src/services/contextSwitchDetector";
+import { runAllEvaluationTests, runSingleTestCase } from "./src/services/testRunner";
+import { DEFAULT_TENANTS } from "./src/services/policyEngine";
 
 dotenv.config();
 
@@ -17,6 +25,10 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// In-memory active ASR language profile
+let activeAsrLanguages: string[] = ['en', 'hi', 'te', 'ta', 'kn'];
+
 
 // Initialize Gemini Client (lazy helper)
 let geminiClient: GoogleGenAI | null = null;
@@ -243,6 +255,164 @@ Evaluate whether this conversation exhibits social-engineering fraud indicators:
       reasoning: "Local linguistic evaluator: Detected patterns in transcript while Gemini upstream experienced temporary demand.",
     });
   }
+});
+
+// Real-Time High-Fidelity Voice Synthesis (Gemini 3.1 Flash TTS)
+app.post("/api/tts", async (req, res) => {
+  const { text, voiceName = "Kore", languageCode = "en" } = req.body;
+  if (!text || typeof text !== "string" || text.trim().length === 0) {
+    return res.status(400).json({ error: "Text is required for audio generation." });
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.status(503).json({ error: "Gemini client not initialized for server TTS." });
+  }
+
+  try {
+    // Truncate text to a reasonable length for fast real-time playback
+    const cleanText = text.trim().slice(0, 450);
+    const chosenVoice = voiceName || (languageCode === "hi" ? "Puck" : "Kore");
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-tts-preview",
+      contents: [{ parts: [{ text: cleanText }] }],
+      config: {
+        responseModalities: ["AUDIO"],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: chosenVoice },
+          },
+        },
+      },
+    });
+
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (base64Audio) {
+      return res.json({
+        success: true,
+        base64Audio,
+        sampleRate: 24000,
+        format: "pcm16",
+        source: "gemini-3.1-flash-tts",
+        voice: chosenVoice,
+      });
+    }
+
+    return res.status(502).json({ error: "No audio stream returned from Gemini TTS." });
+  } catch (err: any) {
+    console.warn("Gemini TTS error (will use high-fidelity client synthesis):", err?.message || err);
+    return res.status(500).json({ error: err?.message || "Gemini TTS unavailable" });
+  }
+});
+
+// ============================================================
+// Multilingual & Context-Switching Test Framework API
+// ============================================================
+
+// 1. Get ASR Configuration and supported languages
+app.get("/api/multilingual/asr-config", (_req, res) => {
+  const languageStatus = SUPPORTED_LANGUAGES.map((lang) => ({
+    ...lang,
+    isAsrSupported: activeAsrLanguages.includes(lang.code),
+  }));
+
+  res.json({
+    activeAsrLanguages,
+    languages: languageStatus,
+    certifiedCount: activeAsrLanguages.length,
+    pendingCount: SUPPORTED_LANGUAGES.length - activeAsrLanguages.length,
+  });
+});
+
+// Update active ASR language profile (demonstrating dynamic capability checks)
+app.post("/api/multilingual/asr-config", (req, res) => {
+  const { languages } = req.body;
+  if (Array.isArray(languages)) {
+    activeAsrLanguages = languages;
+  }
+  res.json({
+    status: "ok",
+    activeAsrLanguages,
+  });
+});
+
+// 2. Get Test Cases & Dataset
+app.get("/api/multilingual/test-cases", (req, res) => {
+  const { category, language } = req.query;
+
+  let testCases = [...MULTILINGUAL_TEST_CASES, ...CONTEXT_SWITCH_TEST_CASES];
+  if (category && typeof category === "string" && category !== "all") {
+    testCases = testCases.filter((t) => t.category === category);
+  }
+  if (language && typeof language === "string" && language !== "all") {
+    testCases = testCases.filter((t) => t.language_code.includes(language));
+  }
+
+  res.json({
+    total: testCases.length,
+    testCases,
+    languages: SUPPORTED_LANGUAGES.map((l) => ({
+      ...l,
+      isAsrSupported: activeAsrLanguages.includes(l.code),
+    })),
+    activeAsrLanguages,
+  });
+});
+
+// 3. Evaluate Single Turn in Conversational Context
+app.post("/api/multilingual/evaluate-turn", (req, res) => {
+  const {
+    callId = "CALL-DEMO-001",
+    turnNumber = 1,
+    transcript,
+    sessionState,
+    tenantId = "tenant-bank",
+    decayPolicy = "decay_gradual",
+    biometricScore = 88,
+    deepfakeScore = 15,
+    replayScore = 12,
+  } = req.body;
+
+  if (!transcript || typeof transcript !== "string") {
+    return res.status(400).json({ error: "Transcript is required for turn evaluation" });
+  }
+
+  const tenantConfig = DEFAULT_TENANTS[tenantId as keyof typeof DEFAULT_TENANTS] || DEFAULT_TENANTS["tenant-bank"];
+
+  const result = evaluateTurnInContext({
+    callId,
+    turnNumber,
+    transcript,
+    sessionState,
+    tenantConfig,
+    decayPolicy,
+    externalBiometricScore: biometricScore,
+    externalDeepfakeScore: deepfakeScore,
+    externalReplayScore: replayScore,
+  });
+
+  res.json(result);
+});
+
+// 4. Run Automated Evaluation Suite
+app.post("/api/multilingual/run-tests", (req, res) => {
+  const {
+    categoryFilter = "all",
+    languageFilter = "all",
+    tenantId = "tenant-bank",
+  } = req.body;
+
+  const tenantConfig = DEFAULT_TENANTS[tenantId as keyof typeof DEFAULT_TENANTS] || DEFAULT_TENANTS["tenant-bank"];
+
+  const report = runAllEvaluationTests({
+    categoryFilter,
+    languageFilter,
+    tenantConfig,
+    asrEnabledLanguages: activeAsrLanguages,
+  });
+
+  res.json(report);
 });
 
 // Layer 9: Mock Integration & API Layer

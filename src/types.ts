@@ -160,10 +160,22 @@ export interface AuditRecord {
   wasRealGemini: boolean;
 }
 
+export type ScenarioCategory =
+  | 'Executive Wire Fraud'
+  | 'Credential Phishing'
+  | 'Acoustic Replay'
+  | 'Context Escalation'
+  | 'Distress Extortion'
+  | 'Vendor Redirection'
+  | 'Multilingual Voice'
+  | 'Benign Business'
+  | 'High Threat Attack'
+  | 'Impersonation Clone';
+
 export interface PreloadedScenario {
   id: string;
   title: string;
-  category: 'High Threat Attack' | 'Impersonation Clone' | 'Credential Phishing' | 'Benign Business';
+  category: ScenarioCategory;
   description: string;
   claimedSpeaker: string;
   action: string;
@@ -174,6 +186,11 @@ export interface PreloadedScenario {
   baseReplay: number;
   simulatedAudioVariant: string;
   acousticArtifacts?: string;
+  expectedDecision?: TrustAction;
+  expectedRiskLevel?: RiskLevel;
+  language?: string;
+  languageCode?: string;
+  turns?: Array<{ turnNumber: number; speaker: string; transcript: string; intent?: string }>;
   ttsVoiceConfig?: {
     pitch?: number;
     rate?: number;
@@ -195,3 +212,125 @@ export interface DbStatus {
   message: string;
   error?: string;
 }
+
+// ==========================================
+// Multilingual & Context-Switching Test Types
+// ==========================================
+
+export type LanguageCode = 'en' | 'hi' | 'te' | 'ta' | 'kn' | 'ml' | 'mr' | 'bn';
+
+export interface LanguageConfig {
+  code: LanguageCode;
+  name: string;
+  nativeName: string;
+  script: string;
+  isAsrSupported: boolean;
+  asrEngineModel: string;
+  sampleUtterance: string;
+}
+
+export type MultilingualCategory =
+  | 'multilingual'
+  | 'context_switching'
+  | 'cross_lingual_speaker'
+  | 'rapid_switching'
+  | 'context_reversal';
+
+export interface ContextSwitchTurn {
+  turn_number: number;
+  language: string;
+  language_code: string;
+  transcript: string;
+  intent: string;
+  expected_context: string;
+  expected_risk_level: RiskLevel;
+  expected_risk_range?: [number, number];
+  actual_risk_score?: number;
+  actual_detected_language?: string;
+  actual_intent?: string;
+  context_switch?: boolean;
+  language_switch?: boolean;
+  coercion_cues?: string[];
+}
+
+export interface TestCaseSchema {
+  test_id: string;
+  category: MultilingualCategory;
+  language: string;
+  language_code: string;
+  scenario: string;
+  input_type: 'audio' | 'text_transcript';
+  expected_language: string;
+  expected_transcription?: string;
+  expected_intent: string;
+  expected_security_category: string;
+  expected_risk_level: RiskLevel;
+  expected_risk_range?: [number, number];
+  expected_decision: TrustAction;
+  sample_transcription: string;
+  acoustic_profile?: string;
+  speaker_id?: string;
+  turns?: ContextSwitchTurn[];
+  // Actual execution metrics
+  actual_transcription?: string;
+  actual_detected_language?: string;
+  actual_intent?: string;
+  actual_risk_score?: number;
+  actual_decision?: TrustAction;
+  passed?: boolean;
+  is_supported?: boolean;
+  failure_reason?: string | null;
+}
+
+export interface SessionContext {
+  call_id: string;
+  turn_number: number;
+  detected_language: string;
+  previous_language: string | null;
+  language_switch: boolean;
+  current_context: string;
+  previous_context: string | null;
+  context_switch: boolean;
+  context_history: string[];
+  language_history: string[];
+  risk_history: number[];
+  decision_history: string[];
+  risk_score: number;
+  decision: TrustAction;
+  risk_change: string; // e.g. "+32", "-15", "0"
+  escalation_flags: string[];
+  decay_policy: 'decay_gradual' | 'retain_elevated' | 'immediate_reset';
+}
+
+export interface ContextSwitchDetectionResult {
+  context_switch: boolean;
+  from: string;
+  to: string;
+  language_switch: boolean;
+  from_language: string;
+  to_language: string;
+  risk_change: string;
+  is_security_escalation: boolean;
+  detected_intent: string;
+  confidence: number;
+  cues: string[];
+}
+
+export interface EvaluationReport {
+  total_tests: number;
+  passed: number;
+  failed: number;
+  unsupported: number;
+  accuracy: number;
+  language_wise_accuracy: Record<
+    string,
+    { total: number; passed: number; failed: number; unsupported: number; accuracy: number }
+  >;
+  context_switch_accuracy: number;
+  intent_classification_accuracy: number;
+  false_positives: number;
+  false_negatives: number;
+  test_results: TestCaseSchema[];
+  execution_timestamp: string;
+}
+

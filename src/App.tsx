@@ -165,36 +165,47 @@ export default function App() {
 
   // Toggle scenario audio playback so users can hear the conversation
   const handleToggleScenarioAudio = (scen: PreloadedScenario) => {
-    if (isPlayingScenarioAudio) {
+    // If clicking Stop on the currently playing scenario, stop it
+    if (isPlayingScenarioAudio && selectedScenario?.id === scen.id) {
       if (scenarioPlayerRef.current) {
         scenarioPlayerRef.current.stop();
       }
       setIsPlayingScenarioAudio(false);
       setAudioVolume(0);
-    } else {
-      // Stop live mic if active
-      if (isStreaming && audioManagerRef.current) {
-        audioManagerRef.current.stop();
-        audioManagerRef.current = null;
-        setIsStreaming(false);
-      }
+      return;
+    }
 
-      if (!scenarioPlayerRef.current) {
-        scenarioPlayerRef.current = new ScenarioAudioPlayer(
-          (vol) => setAudioVolume(vol),
-          (playing) => setIsPlayingScenarioAudio(playing),
-          (feats) => setAudioFeatures(feats)
-        );
-      }
+    // Stop previous audio playback if any
+    if (scenarioPlayerRef.current) {
+      scenarioPlayerRef.current.stop();
+    }
 
-      const cfg = scen.ttsVoiceConfig || {};
-      scenarioPlayerRef.current.play(
-        scen.sampleTranscript,
-        cfg.voiceFilter || 'natural',
-        cfg.pitch || 1.0,
-        cfg.rate || 1.0
+    // Stop live mic if active
+    if (isStreaming && audioManagerRef.current) {
+      audioManagerRef.current.stop();
+      audioManagerRef.current = null;
+      setIsStreaming(false);
+    }
+
+    // Select scenario and load transcript & details
+    handleSelectScenario(scen);
+
+    if (!scenarioPlayerRef.current) {
+      scenarioPlayerRef.current = new ScenarioAudioPlayer(
+        (vol) => setAudioVolume(vol),
+        (playing) => setIsPlayingScenarioAudio(playing),
+        (feats) => setAudioFeatures(feats)
       );
     }
+
+    const cfg = scen.ttsVoiceConfig || {};
+    scenarioPlayerRef.current.play(
+      scen.sampleTranscript,
+      cfg.voiceFilter || 'natural',
+      cfg.pitch || 1.0,
+      cfg.rate || 1.0,
+      scen.languageCode || 'en'
+    );
   };
 
   // Layer 3 Signals (Deepfake, Speaker, Replay)
@@ -594,6 +605,7 @@ export default function App() {
                   currentTenant={currentTenant}
                   onSimulateResolveStepUp={handleResolveStepUp}
                   stepUpResolved={stepUpResolved}
+                  selectedScenario={selectedScenario}
                 />
 
                 {/* Quick Database Persistence Action (Layer 8 Audit Storage) */}

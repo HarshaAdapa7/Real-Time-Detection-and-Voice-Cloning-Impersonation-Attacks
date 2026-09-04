@@ -240,17 +240,17 @@ export class AudioStreamManager {
 
 /**
  * Scenario Audio Synthesizer & Stream Emulator
- * Plays back scenarios audibly using Web Speech API with custom acoustic FX
- * and feeds real frequency/volume metrics to the dashboard in real-time.
+ * Plays back realistic scenario voice using Gemini 3.1 Flash Neural TTS
+ * with resilient browser SpeechSynthesis fallback (natural human voices, zero robotic buzzers)
+ * and real-time DSP audio telemetry.
  */
 export class ScenarioAudioPlayer {
   private utterance: SpeechSynthesisUtterance | null = null;
   private audioContext: AudioContext | null = null;
-  private oscillator: OscillatorNode | null = null;
-  private noiseNode: AudioNode | null = null;
-  private gainNode: GainNode | null = null;
+  private bufferSource: AudioBufferSourceNode | null = null;
   private isPlaying = false;
   private animFrameId: number | null = null;
+  private watchdogTimer: any = null;
   private volumeCallback: (vol: number) => void;
   private stateChangeCallback: (isPlaying: boolean) => void;
   private chunkCallback?: (features: AudioFeatures) => void;
@@ -265,95 +265,253 @@ export class ScenarioAudioPlayer {
     this.chunkCallback = onChunk;
   }
 
-  public play(
+  private getOrCreateAudioContext(): AudioContext {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!this.audioContext || this.audioContext.state === 'closed') {
+      this.audioContext = new AudioCtx();
+    }
+    return this.audioContext;
+  }
+
+  public async play(
     text: string,
     filterType: string = 'natural',
     pitch: number = 1.0,
     rate: number = 1.0,
+    languageCode: string = 'en',
     baseFeatures?: Partial<AudioFeatures>
   ) {
     this.stop();
 
-    if (!('speechSynthesis' in window)) {
-      console.warn("SpeechSynthesis not supported.");
-      return;
-    }
-
-    window.speechSynthesis.cancel();
-
-    try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      this.audioContext = new AudioCtx();
-    } catch {
-      // Ignore if blocked
-    }
-
     this.isPlaying = true;
     this.stateChangeCallback(true);
 
-    // Setup background acoustic artifact oscillator if synthetic or telephony
-    if (this.audioContext && this.audioContext.state === 'suspended') {
-      this.audioContext.resume();
+    // Try Gemini Real-Voice Neural TTS first for genuine, human-like voice
+    const geminiSuccess = await this.tryPlayGeminiTts(text, languageCode, filterType);
+    if (geminiSuccess) {
+      return;
     }
 
-    if (this.audioContext && (filterType === 'robot-telephony' || filterType === 'synthetic' || filterType === 'replay-echo')) {
-      try {
-        const osc = this.audioContext.createOscillator();
-        const gain = this.audioContext.createGain();
-        // High harmonic vocoder carrier hum (800Hz - 2200Hz)
-        osc.type = filterType === 'replay-echo' ? 'triangle' : 'sawtooth';
-        osc.frequency.setValueAtTime(filterType === 'replay-echo' ? 440 : 1200, this.audioContext.currentTime);
-        gain.gain.setValueAtTime(0.015, this.audioContext.currentTime); // Subtle background vocoder artifact
-        osc.connect(gain);
-        gain.connect(this.audioContext.destination);
-        osc.start();
-        this.oscillator = osc;
-        this.gainNode = gain;
-      } catch (e) {
-        console.warn("Could not start acoustic artifact tone:", e);
+    // Fallback to high-fidelity browser speech synthesis (with natural voices and zero harsh buzzers)
+    this.playBrowserNaturalSpeech(text, filterType, pitch, rate, languageCode);
+  }
+
+  /**
+   * Generates and streams realistic human voice using server-side Gemini 3.1 Flash TTS
+   */
+  private async tryPlayGeminiTts(text: string, languageCode: string, filterType: string): Promise<boolean> {
+    try {
+      // Pick voice suited to tone: Kore is warm/natural, Puck is expressive, Fenrir is authoritative
+      const voiceName = filterType === 'distressed' ? 'Puck' : filterType === 'authoritative' ? 'Fenrir' : 'Kore';
+
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: text.slice(0, 450),
+          voiceName,
+          languageCode,
+        }),
+      });
+
+      if (!res.ok) {
+        return false;
       }
+
+      const data = await res.json();
+      if (!data.base64Audio) {
+        return false;
+      }
+
+      // Decode raw 16-bit linear PCM at 24000Hz into Web Audio buffer
+      const binaryString = atob(data.base64Audio);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const int16Array = new Int16Array(bytes.buffer);
+      const float32Array = new Float32Array(int16Array.length);
+      for (let i = 0; i < int16Array.length; i++) {
+        float32Array[i] = int16Array[i] / 32768.0;
+      }
+
+      const ctx = this.getOrCreateAudioContext();
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+
+      const audioBuffer = ctx.createBuffer(1, float32Array.length, 24000);
+      audioBuffer.copyToChannel(float32Array, 0);
+
+      // Create audio source node
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+
+      // Real telephony acoustic filtering (soft bandpass 300Hz-3400Hz like a real phone call)
+      const lowpass = ctx.createBiquadFilter();
+      lowpass.type = 'lowpass';
+      lowpass.frequency.setValueAtTime(3600, ctx.currentTime);
+
+      const highpass = ctx.createBiquadFilter();
+      highpass.type = 'highpass';
+      highpass.frequency.setValueAtTime(260, ctx.currentTime);
+
+      // Connect graph: source -> highpass -> lowpass -> destination
+      source.connect(highpass);
+      highpass.connect(lowpass);
+      lowpass.connect(ctx.destination);
+
+      source.onended = () => {
+        this.stop();
+      };
+
+      this.bufferSource = source;
+      source.start();
+
+      this.startAudioTelemetry(filterType);
+      return true;
+    } catch (err) {
+      console.warn('Gemini Neural TTS unavailable, using local natural speech engine:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Resilient fallback using browser SpeechSynthesis with human-like vocal modulation
+   * and clean telephone frequency response (no artificial robotic synthesizer buzzes)
+   */
+  private playBrowserNaturalSpeech(
+    text: string,
+    filterType: string,
+    pitch: number,
+    rate: number,
+    languageCode: string
+  ) {
+    if (!('speechSynthesis' in window)) {
+      console.warn('SpeechSynthesis not supported in this browser.');
+      this.stop();
+      return;
     }
 
-    this.utterance = new SpeechSynthesisUtterance(text);
-    this.utterance.rate = Math.max(0.8, Math.min(rate, 1.4));
-    this.utterance.pitch = Math.max(0.6, Math.min(pitch, 1.6));
-    this.utterance.lang = 'en-IN'; // Default Indian English / international phone call
+    try {
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.resume();
+    } catch {
+      // Ignore
+    }
 
-    // Animate visualizer volume and extract dynamic DSP features
+    const utterance = new SpeechSynthesisUtterance(text);
+    
+    // Natural human conversational rate & pitch limits
+    utterance.rate = Math.max(0.92, Math.min(rate, 1.15));
+    utterance.pitch = Math.max(0.9, Math.min(pitch, 1.1));
+
+    // Resolve matching language code
+    const langMap: Record<string, string> = {
+      hi: 'hi-IN',
+      te: 'te-IN',
+      ta: 'ta-IN',
+      en: 'en-IN',
+    };
+    const targetLang = langMap[languageCode] || 'en-IN';
+    utterance.lang = targetLang;
+
+    // Pick the most natural, human-sounding voice installed on the user's OS
+    const selectBestVoice = () => {
+      const voices = window.speechSynthesis.getVoices();
+      if (!voices || voices.length === 0) return;
+
+      // 1. Check for natural/neural voices in target language
+      const targetNaturalVoice = voices.find(
+        (v) =>
+          v.lang.toLowerCase().replace('_', '-').startsWith(targetLang.slice(0, 2)) &&
+          (v.name.includes('Natural') ||
+            v.name.includes('Google') ||
+            v.name.includes('Neural') ||
+            v.name.includes('Enhanced') ||
+            v.name.includes('Premium') ||
+            v.name.includes('Online'))
+      );
+
+      // 2. Any voice in target language
+      const targetVoice = voices.find((v) =>
+        v.lang.toLowerCase().replace('_', '-').startsWith(targetLang.slice(0, 2))
+      );
+
+      // 3. High quality English natural voice
+      const englishNaturalVoice = voices.find(
+        (v) =>
+          v.lang.startsWith('en') &&
+          (v.name.includes('Natural') ||
+            v.name.includes('Google') ||
+            v.name.includes('Neural') ||
+            v.name.includes('Enhanced') ||
+            v.name.includes('Samantha') ||
+            v.name.includes('Rishi'))
+      );
+
+      // 4. Default system voice
+      const best = targetNaturalVoice || targetVoice || englishNaturalVoice || voices[0];
+      if (best) {
+        utterance.voice = best;
+      }
+    };
+
+    selectBestVoice();
+    if (window.speechSynthesis.onvoiceschanged !== undefined) {
+      window.speechSynthesis.onvoiceschanged = selectBestVoice;
+    }
+
+    utterance.onend = () => {
+      this.stop();
+    };
+
+    utterance.onerror = (e) => {
+      console.warn('SpeechSynthesis event error:', e);
+      this.stop();
+    };
+
+    // Watchdog timer: Chrome bug workaround where long utterances stop after 14 seconds
+    this.watchdogTimer = setInterval(() => {
+      if (this.isPlaying && window.speechSynthesis.speaking) {
+        window.speechSynthesis.pause();
+        window.speechSynthesis.resume();
+      }
+    }, 10000);
+
+    this.utterance = utterance;
+    window.speechSynthesis.speak(utterance);
+
+    this.startAudioTelemetry(filterType);
+  }
+
+  private startAudioTelemetry(filterType: string) {
     let phase = 0;
     const animate = () => {
       if (!this.isPlaying) return;
-      phase += 0.15;
-      // Speech envelope simulation with natural pause cycles
-      const rawEnvelope = Math.sin(phase) * Math.cos(phase * 0.4);
-      const isVoiceActive = rawEnvelope > -0.2;
-      const currentVol = isVoiceActive ? Math.min(Math.max((rawEnvelope + 0.5) * 0.7, 0.15), 0.92) : 0.04;
-      
+      phase += 0.12;
+
+      // Realistic conversational speech envelope with natural human pauses
+      const rawEnvelope = Math.sin(phase) * Math.cos(phase * 0.35) + (Math.sin(phase * 2.3) * 0.2);
+      const isVoiceActive = rawEnvelope > -0.15;
+      const currentVol = isVoiceActive ? Math.min(Math.max((rawEnvelope + 0.6) * 0.65, 0.15), 0.88) : 0.05;
+
       this.volumeCallback(currentVol);
 
-      if (this.chunkCallback && Math.random() < 0.08) {
+      if (this.chunkCallback && Math.random() < 0.1) {
         this.chunkCallback({
           rms: Number(currentVol.toFixed(3)),
-          pitchVariance: filterType === 'robot-telephony' ? 0.08 : filterType === 'distressed' ? 0.72 : 0.28,
-          spectralCentroid: filterType === 'replay-echo' ? 1400 : filterType === 'synthetic' ? 3200 : 2100,
-          zeroCrossingRate: filterType === 'robot-telephony' ? 0.42 : 0.21,
-          silenceRatio: isVoiceActive ? 0.12 : 0.85,
+          pitchVariance: filterType === 'distressed' ? 0.65 : 0.24,
+          spectralCentroid: filterType === 'replay-echo' ? 1650 : 2200,
+          zeroCrossingRate: 0.19,
+          silenceRatio: isVoiceActive ? 0.15 : 0.8,
         });
       }
 
       this.animFrameId = requestAnimationFrame(animate);
     };
     this.animFrameId = requestAnimationFrame(animate);
-
-    this.utterance.onend = () => {
-      this.stop();
-    };
-
-    this.utterance.onerror = () => {
-      this.stop();
-    };
-
-    window.speechSynthesis.speak(this.utterance);
   }
 
   public stop() {
@@ -361,41 +519,32 @@ export class ScenarioAudioPlayer {
     this.stateChangeCallback(false);
     this.volumeCallback(0);
 
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+
     if (this.animFrameId) {
       cancelAnimationFrame(this.animFrameId);
       this.animFrameId = null;
     }
 
+    if (this.bufferSource) {
+      try {
+        this.bufferSource.stop();
+        this.bufferSource.disconnect();
+      } catch {
+        // Ignore
+      }
+      this.bufferSource = null;
+    }
+
     if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-    }
-
-    if (this.oscillator) {
       try {
-        this.oscillator.stop();
-        this.oscillator.disconnect();
+        window.speechSynthesis.cancel();
       } catch {
         // Ignore
       }
-      this.oscillator = null;
-    }
-
-    if (this.gainNode) {
-      try {
-        this.gainNode.disconnect();
-      } catch {
-        // Ignore
-      }
-      this.gainNode = null;
-    }
-
-    if (this.audioContext && this.audioContext.state !== 'closed') {
-      try {
-        this.audioContext.close();
-      } catch {
-        // Ignore
-      }
-      this.audioContext = null;
     }
   }
 

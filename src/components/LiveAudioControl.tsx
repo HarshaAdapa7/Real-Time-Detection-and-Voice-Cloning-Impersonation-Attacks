@@ -1,6 +1,22 @@
-import React, { useState } from 'react';
-import { Mic, MicOff, Play, Square, Volume2, Sparkles, Activity, AlertCircle, Headphones, Radio } from 'lucide-react';
-import { AudioFeatures, PreloadedScenario } from '../types';
+import React, { useState, useMemo } from 'react';
+import { 
+  Mic, 
+  MicOff, 
+  Play, 
+  Square, 
+  Volume2, 
+  Sparkles, 
+  Activity, 
+  AlertCircle, 
+  Headphones, 
+  Radio, 
+  Search, 
+  ShieldAlert, 
+  ShieldCheck, 
+  CheckCircle2, 
+  Globe 
+} from 'lucide-react';
+import { AudioFeatures, PreloadedScenario, ScenarioCategory } from '../types';
 import { PRELOADED_SCENARIOS } from '../data/contextDataset';
 
 interface LiveAudioControlProps {
@@ -16,6 +32,18 @@ interface LiveAudioControlProps {
   onToggleScenarioAudio?: (scenario: PreloadedScenario) => void;
 }
 
+const CATEGORY_TABS: Array<{ id: string; label: string; count: (scenarios: PreloadedScenario[]) => number }> = [
+  { id: 'ALL', label: 'All Test Cases', count: (s) => s.length },
+  { id: 'Executive Wire Fraud', label: 'Executive Wire Fraud', count: (s) => s.filter((x) => x.category === 'Executive Wire Fraud').length },
+  { id: 'Credential Phishing', label: 'Credential Phishing', count: (s) => s.filter((x) => x.category === 'Credential Phishing').length },
+  { id: 'Acoustic Replay', label: 'Acoustic Replay', count: (s) => s.filter((x) => x.category === 'Acoustic Replay').length },
+  { id: 'Context Escalation', label: 'Context Escalation', count: (s) => s.filter((x) => x.category === 'Context Escalation').length },
+  { id: 'Distress Extortion', label: 'Distress Extortion', count: (s) => s.filter((x) => x.category === 'Distress Extortion').length },
+  { id: 'Vendor Redirection', label: 'Vendor Redirection', count: (s) => s.filter((x) => x.category === 'Vendor Redirection').length },
+  { id: 'Multilingual Voice', label: 'Multilingual Voice', count: (s) => s.filter((x) => x.category === 'Multilingual Voice').length },
+  { id: 'Benign Business', label: 'Benign Baselines (Pass)', count: (s) => s.filter((x) => x.category === 'Benign Business').length },
+];
+
 export const LiveAudioControl: React.FC<LiveAudioControlProps> = ({
   isStreaming,
   onToggleMic,
@@ -29,13 +57,30 @@ export const LiveAudioControl: React.FC<LiveAudioControlProps> = ({
   onToggleScenarioAudio,
 }) => {
   const [filterCategory, setFilterCategory] = useState<string>('ALL');
+  const [searchQuery, setSearchQuery] = useState<string>('');
 
-  const filteredScenarios = PRELOADED_SCENARIOS.filter((s) => {
-    if (filterCategory === 'ALL') return true;
-    if (filterCategory === 'ATTACKS') return s.category !== 'Benign Business';
-    if (filterCategory === 'BENIGN') return s.category === 'Benign Business';
-    return true;
-  });
+  const filteredScenarios = useMemo(() => {
+    return PRELOADED_SCENARIOS.filter((s) => {
+      // Category match
+      if (filterCategory !== 'ALL' && s.category !== filterCategory) {
+        return false;
+      }
+      // Search query match
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const matchesTitle = s.title.toLowerCase().includes(q);
+        const matchesDesc = s.description.toLowerCase().includes(q);
+        const matchesAction = s.action.toLowerCase().includes(q);
+        const matchesTranscript = s.sampleTranscript.toLowerCase().includes(q);
+        const matchesLang = s.language?.toLowerCase().includes(q);
+        const matchesCat = s.category.toLowerCase().includes(q);
+        if (!matchesTitle && !matchesDesc && !matchesAction && !matchesTranscript && !matchesLang && !matchesCat) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [filterCategory, searchQuery]);
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs">
@@ -171,19 +216,52 @@ export const LiveAudioControl: React.FC<LiveAudioControlProps> = ({
         </div>
       </div>
 
-      {/* Currently Active Call Acoustic Banner */}
+      {/* Currently Active Call Acoustic & Test Banner */}
       {selectedScenario && (
-        <div className="mb-4 p-3 rounded-xl bg-indigo-50/60 border border-indigo-200/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs">
-          <div>
-            <div className="font-semibold text-slate-900 flex items-center gap-1.5">
+        <div className="mb-4 p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs shadow-2xs">
+          <div className="space-y-1">
+            <div className="font-semibold text-slate-900 flex flex-wrap items-center gap-2">
               <Headphones className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-              <span>Loaded Audio Sample: <strong>{selectedScenario.title}</strong></span>
+              <span>Active Test Case: <strong className="text-indigo-950">{selectedScenario.title}</strong></span>
+              
+              <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-indigo-100/80 text-indigo-800 border border-indigo-200">
+                {selectedScenario.category}
+              </span>
+
+              {selectedScenario.expectedDecision && (
+                <span
+                  className={`text-[10px] px-2 py-0.5 rounded-md font-mono font-bold flex items-center gap-1 ${
+                    selectedScenario.expectedDecision === 'BLOCK'
+                      ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                      : selectedScenario.expectedDecision === 'VERIFY'
+                      ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                      : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                  }`}
+                >
+                  {selectedScenario.expectedDecision === 'BLOCK' ? (
+                    <ShieldAlert className="w-3 h-3 text-rose-600" />
+                  ) : selectedScenario.expectedDecision === 'VERIFY' ? (
+                    <AlertCircle className="w-3 h-3 text-amber-600" />
+                  ) : (
+                    <ShieldCheck className="w-3 h-3 text-emerald-600" />
+                  )}
+                  Ground-Truth Target: {selectedScenario.expectedDecision}
+                </span>
+              )}
+
+              {selectedScenario.language && selectedScenario.language !== 'English' && (
+                <span className="text-[10px] px-2 py-0.5 rounded font-medium bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
+                  <Globe className="w-2.5 h-2.5" />
+                  {selectedScenario.language}
+                </span>
+              )}
             </div>
-            <p className="text-[11px] text-slate-600 mt-0.5 font-mono">
-              Variant: {selectedScenario.simulatedAudioVariant}
+
+            <p className="text-[11px] text-slate-600 font-mono">
+              <span className="font-semibold text-slate-700">Audio Profile:</span> {selectedScenario.simulatedAudioVariant}
             </p>
             {selectedScenario.acousticArtifacts && (
-              <p className="text-[10px] text-indigo-900/80 mt-0.5">
+              <p className="text-[10px] text-indigo-950">
                 <span className="font-semibold text-indigo-700">Acoustic Markers:</span> {selectedScenario.acousticArtifacts}
               </p>
             )}
@@ -192,15 +270,19 @@ export const LiveAudioControl: React.FC<LiveAudioControlProps> = ({
           {onToggleScenarioAudio && (
             <button
               onClick={() => onToggleScenarioAudio(selectedScenario)}
-              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs flex items-center gap-1.5 transition shrink-0 cursor-pointer shadow-2xs"
+              className={`px-3.5 py-2 rounded-lg font-semibold text-xs flex items-center gap-2 transition shrink-0 cursor-pointer shadow-xs ${
+                isPlayingScenarioAudio
+                  ? 'bg-amber-600 hover:bg-amber-700 text-white animate-pulse'
+                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+              }`}
             >
               {isPlayingScenarioAudio ? (
                 <>
-                  <Square className="w-3 h-3 fill-current" /> Pause
+                  <Square className="w-3.5 h-3.5 fill-current" /> Stop Audio
                 </>
               ) : (
                 <>
-                  <Play className="w-3 h-3 fill-current" /> Play Call Voice
+                  <Play className="w-3.5 h-3.5 fill-current" /> Play Call Voice
                 </>
               )}
             </button>
@@ -228,121 +310,219 @@ export const LiveAudioControl: React.FC<LiveAudioControlProps> = ({
         </div>
       </div>
 
-      {/* Preset Red-Team Attack Scenarios */}
+      {/* Preset Red-Team Attack Scenarios & Test Suite */}
       <div>
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2.5">
-          <span className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-            Evaluation Audio Scenarios (Click any card to select & listen):
-          </span>
+        <div className="flex flex-col gap-3 mb-3.5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                Evaluation Audio & Threat Category Test Cases
+              </span>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Select any threat or benign scenario to evaluate the real-time trust pipeline model against ground-truth decisions.
+              </p>
+            </div>
 
-          {/* Scenario Filters */}
-          <div className="flex items-center space-x-1.5 text-xs">
-            <button
-              onClick={() => setFilterCategory('ALL')}
-              className={`px-2 py-0.5 rounded text-[11px] font-medium transition cursor-pointer ${
-                filterCategory === 'ALL'
-                  ? 'bg-slate-900 text-white'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              All ({PRELOADED_SCENARIOS.length})
-            </button>
-            <button
-              onClick={() => setFilterCategory('ATTACKS')}
-              className={`px-2 py-0.5 rounded text-[11px] font-medium transition cursor-pointer ${
-                filterCategory === 'ATTACKS'
-                  ? 'bg-rose-600 text-white'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              Attacks & Clones
-            </button>
-            <button
-              onClick={() => setFilterCategory('BENIGN')}
-              className={`px-2 py-0.5 rounded text-[11px] font-medium transition cursor-pointer ${
-                filterCategory === 'BENIGN'
-                  ? 'bg-emerald-600 text-white'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              Benign Baselines
-            </button>
+            {/* Quick Search Input */}
+            <div className="relative w-full sm:w-64">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search test cases, languages..."
+                className="w-full pl-8 pr-2.5 py-1 text-xs rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-indigo-500 text-slate-800 placeholder:text-slate-400"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-[11px]"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Category Filter Pills */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            {CATEGORY_TABS.map((cat) => {
+              const count = cat.count(PRELOADED_SCENARIOS);
+              const isActive = filterCategory === cat.id;
+              return (
+                <button
+                  key={cat.id}
+                  onClick={() => setFilterCategory(cat.id)}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                    isActive
+                      ? 'bg-slate-900 text-white font-semibold shadow-xs'
+                      : 'bg-slate-100 hover:bg-slate-200/80 text-slate-600'
+                  }`}
+                >
+                  <span>{cat.label}</span>
+                  <span
+                    className={`px-1.5 py-0.2 rounded-full text-[9px] font-mono font-bold ${
+                      isActive ? 'bg-slate-700 text-slate-200' : 'bg-slate-200/80 text-slate-600'
+                    }`}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-          {filteredScenarios.map((scen) => {
-            const isSelected = selectedScenario?.id === scen.id;
-            const isCurrentlyPlaying = isSelected && isPlayingScenarioAudio;
-            return (
-              <div
-                key={scen.id}
-                id={`btn-scenario-${scen.id}`}
-                onClick={() => onSelectScenario(scen)}
-                className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between cursor-pointer group ${
-                  isSelected
-                    ? 'bg-amber-50/70 border-amber-400 ring-1 ring-amber-400 text-slate-900 shadow-xs'
-                    : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-800 shadow-2xs'
-                }`}
-              >
-                <div>
-                  <div className="flex items-center justify-between gap-1 mb-1.5">
-                    <span className="text-xs font-bold text-slate-900 line-clamp-1">{scen.title}</span>
-                    <span
-                      className={`text-[9px] px-1.5 py-0.5 rounded font-semibold uppercase shrink-0 ${
-                        scen.category === 'High Threat Attack'
-                          ? 'bg-rose-50 text-rose-700 border border-rose-200'
-                          : scen.category === 'Credential Phishing'
-                          ? 'bg-orange-50 text-orange-700 border border-orange-200'
-                          : scen.category === 'Impersonation Clone'
-                          ? 'bg-purple-50 text-purple-700 border border-purple-200'
-                          : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                      }`}
-                    >
-                      {scen.category}
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
-                    {scen.description}
-                  </p>
-                </div>
+        {/* Scenarios Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {filteredScenarios.length === 0 ? (
+            <div className="col-span-full py-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200 text-slate-500 text-xs">
+              No test cases match "{searchQuery}". Try clearing your search query.
+            </div>
+          ) : (
+            filteredScenarios.map((scen) => {
+              const isSelected = selectedScenario?.id === scen.id;
+              const isCurrentlyPlaying = isSelected && isPlayingScenarioAudio;
 
-                <div className="mt-2.5 pt-2 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-500 font-mono">
-                  <span>Deepfake: <strong className={scen.baseDeepfake > 60 ? "text-rose-600" : "text-emerald-700"}>{scen.baseDeepfake}%</strong></span>
-                  
-                  {onToggleScenarioAudio ? (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSelectScenario(scen);
-                        onToggleScenarioAudio(scen);
-                      }}
-                      className={`px-2 py-0.5 rounded flex items-center gap-1 font-semibold transition cursor-pointer ${
-                        isCurrentlyPlaying
-                          ? 'bg-amber-600 text-white'
-                          : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
-                      }`}
-                    >
-                      {isCurrentlyPlaying ? (
-                        <>
-                          <Square className="w-2.5 h-2.5 fill-current" /> Stop Audio
-                        </>
-                      ) : (
-                        <>
-                          <Headphones className="w-2.5 h-2.5" /> Hear Voice
-                        </>
+              const isBlock = scen.expectedDecision === 'BLOCK';
+              const isVerify = scen.expectedDecision === 'VERIFY';
+              const isAllow = scen.expectedDecision === 'ALLOW';
+
+              return (
+                <div
+                  key={scen.id}
+                  id={`btn-scenario-${scen.id}`}
+                  onClick={() => onSelectScenario(scen)}
+                  className={`p-3.5 rounded-xl border text-left transition-all flex flex-col justify-between cursor-pointer group ${
+                    isSelected
+                      ? 'bg-amber-50/80 border-amber-400 ring-2 ring-amber-300/80 text-slate-900 shadow-xs'
+                      : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-800 shadow-2xs'
+                  }`}
+                >
+                  <div>
+                    {/* Top Row: Category + Expected Decision Badge */}
+                    <div className="flex items-center justify-between gap-1.5 mb-2">
+                      <span
+                        className={`text-[9px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider shrink-0 ${
+                          scen.category === 'Executive Wire Fraud'
+                            ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                            : scen.category === 'Credential Phishing'
+                            ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                            : scen.category === 'Acoustic Replay'
+                            ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                            : scen.category === 'Context Escalation'
+                            ? 'bg-orange-100 text-orange-800 border border-orange-200'
+                            : scen.category === 'Distress Extortion'
+                            ? 'bg-red-100 text-red-800 border border-red-200'
+                            : scen.category === 'Vendor Redirection'
+                            ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                            : scen.category === 'Multilingual Voice'
+                            ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                            : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                        }`}
+                      >
+                        {scen.category}
+                      </span>
+
+                      {scen.expectedDecision && (
+                        <span
+                          className={`text-[9px] px-1.5 py-0.5 rounded-md font-mono font-bold flex items-center gap-1 ${
+                            isBlock
+                              ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                              : isVerify
+                              ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                              : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          }`}
+                        >
+                          {isBlock ? (
+                            <ShieldAlert className="w-2.5 h-2.5 text-rose-600" />
+                          ) : isVerify ? (
+                            <AlertCircle className="w-2.5 h-2.5 text-amber-600" />
+                          ) : (
+                            <ShieldCheck className="w-2.5 h-2.5 text-emerald-600" />
+                          )}
+                          EXPECT: {scen.expectedDecision}
+                        </span>
                       )}
-                    </button>
-                  ) : (
-                    <span className="text-indigo-600 flex items-center gap-1 font-semibold">
-                      <Play className="w-2.5 h-2.5 fill-current" /> Select
-                    </span>
-                  )}
+                    </div>
+
+                    {/* Title */}
+                    <div className="flex items-start justify-between gap-1 mb-1">
+                      <span className="text-xs font-bold text-slate-900 group-hover:text-indigo-600 transition leading-snug">
+                        {scen.title}
+                      </span>
+                      {scen.language && scen.language !== 'English' && (
+                        <span className="shrink-0 text-[10px] bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.2 rounded font-medium flex items-center gap-1">
+                          <Globe className="w-2.5 h-2.5" />
+                          {scen.language}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Description */}
+                    <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
+                      {scen.description}
+                    </p>
+
+                    {/* Action Preview */}
+                    <div className="mt-2 text-[10px] text-slate-600 bg-slate-50 p-1.5 rounded border border-slate-100 truncate">
+                      <span className="font-semibold text-slate-700">Action:</span> {scen.action}
+                    </div>
+                  </div>
+
+                  {/* Footer Stats & Audio Button */}
+                  <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-500 font-mono">
+                    <div className="flex items-center space-x-2">
+                      <span>
+                        Deepfake:{' '}
+                        <strong className={scen.baseDeepfake > 60 ? 'text-rose-600' : 'text-emerald-700'}>
+                          {scen.baseDeepfake}%
+                        </strong>
+                      </span>
+                      <span>
+                        Sim:{' '}
+                        <strong className={scen.baseSpeakerSim < 60 ? 'text-rose-600' : 'text-emerald-700'}>
+                          {scen.baseSpeakerSim}%
+                        </strong>
+                      </span>
+                    </div>
+
+                    {onToggleScenarioAudio ? (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectScenario(scen);
+                          onToggleScenarioAudio(scen);
+                        }}
+                        className={`px-2.5 py-1 rounded-md flex items-center gap-1.5 font-semibold text-[11px] transition cursor-pointer ${
+                          isCurrentlyPlaying
+                            ? 'bg-amber-600 text-white shadow-xs'
+                            : isSelected
+                            ? 'bg-indigo-600 text-white shadow-xs hover:bg-indigo-700'
+                            : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                        }`}
+                      >
+                        {isCurrentlyPlaying ? (
+                          <>
+                            <Square className="w-2.5 h-2.5 fill-current" /> Stop Audio
+                          </>
+                        ) : (
+                          <>
+                            <Headphones className="w-2.5 h-2.5" /> Listen
+                          </>
+                        )}
+                      </button>
+                    ) : (
+                      <span className="text-indigo-600 flex items-center gap-1 font-semibold text-[11px]">
+                        <Play className="w-2.5 h-2.5 fill-current" /> Select
+                      </span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })
+          )}
         </div>
       </div>
     </div>

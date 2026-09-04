@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { ShieldCheck, ShieldAlert, AlertTriangle, Ban, ArrowRight, CheckCircle2, RotateCcw } from 'lucide-react';
-import { PolicyDecision, RiskFusionResult, TenantConfig } from '../types';
+import { ShieldCheck, ShieldAlert, AlertTriangle, Ban, ArrowRight, CheckCircle2, RotateCcw, Target } from 'lucide-react';
+import { PolicyDecision, RiskFusionResult, TenantConfig, PreloadedScenario } from '../types';
 
 interface RiskDecisionGaugeProps {
   fusionResult: RiskFusionResult;
@@ -8,6 +8,7 @@ interface RiskDecisionGaugeProps {
   currentTenant: TenantConfig;
   onSimulateResolveStepUp: () => void;
   stepUpResolved: boolean;
+  selectedScenario?: PreloadedScenario | null;
 }
 
 export const RiskDecisionGauge: React.FC<RiskDecisionGaugeProps> = ({
@@ -16,6 +17,7 @@ export const RiskDecisionGauge: React.FC<RiskDecisionGaugeProps> = ({
   currentTenant,
   onSimulateResolveStepUp,
   stepUpResolved,
+  selectedScenario,
 }) => {
   const [simulatedOtpInput, setSimulatedOtpInput] = useState('');
   const [otpError, setOtpError] = useState(false);
@@ -261,6 +263,29 @@ export const RiskDecisionGauge: React.FC<RiskDecisionGaugeProps> = ({
         {action === 'BLOCK' && (
           <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-700 flex items-center justify-between">
             <span>Critical Threat Blocked: Telephony SIP session terminated. Incident ticket #INC-9481 logged to Bank SOC.</span>
+          </div>
+        )}
+
+        {/* Test Case Ground-Truth Verification Match */}
+        {selectedScenario?.expectedDecision && (
+          <div className={`p-2.5 rounded-lg border text-xs flex items-center justify-between gap-2 ${
+            action === selectedScenario.expectedDecision
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : 'bg-amber-50 border-amber-200 text-amber-900'
+          }`}>
+            <div className="flex items-center gap-2">
+              <Target className={`w-3.5 h-3.5 ${action === selectedScenario.expectedDecision ? 'text-emerald-600' : 'text-amber-600'}`} />
+              <span>
+                <strong>Test Target:</strong> Expected <code className="font-mono font-bold px-1 bg-white/80 rounded border border-slate-200">{selectedScenario.expectedDecision}</code> vs Actual <code className="font-mono font-bold px-1 bg-white/80 rounded border border-slate-200">{action}</code>
+              </span>
+            </div>
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full font-mono uppercase shrink-0 ${
+              action === selectedScenario.expectedDecision
+                ? 'bg-emerald-600 text-white'
+                : 'bg-amber-500 text-white'
+            }`}>
+              {action === selectedScenario.expectedDecision ? '✓ TEST PASSED' : 'DISCREPANCY'}
+            </span>
           </div>
         )}
       </div>
