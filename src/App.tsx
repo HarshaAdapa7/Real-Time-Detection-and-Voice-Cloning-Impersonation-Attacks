@@ -47,7 +47,7 @@ import { evaluateConversationRisk } from './services/nlpSignal';
 import { evaluateContextRisk } from './services/contextSignal';
 import { fuseRiskSignals } from './services/riskFusion';
 import { ENROLLED_PROFILES, PRELOADED_SCENARIOS } from './data/contextDataset';
-import { AudioStreamManager } from './utils/audioProcessor';
+import { AudioStreamManager, ScenarioAudioPlayer } from './utils/audioProcessor';
 
 export default function App() {
   // Navigation & View State
@@ -61,6 +61,7 @@ export default function App() {
 
   // Audio Stream & Ingestion State (Layers 1 & 2)
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isPlayingScenarioAudio, setIsPlayingScenarioAudio] = useState(false);
   const [audioVolume, setAudioVolume] = useState(0);
   const [chunkCount, setChunkCount] = useState(0);
   const [audioFeatures, setAudioFeatures] = useState<AudioFeatures>({
@@ -160,6 +161,41 @@ export default function App() {
 
   // Audio Stream Manager ref
   const audioManagerRef = useRef<AudioStreamManager | null>(null);
+  const scenarioPlayerRef = useRef<ScenarioAudioPlayer | null>(null);
+
+  // Toggle scenario audio playback so users can hear the conversation
+  const handleToggleScenarioAudio = (scen: PreloadedScenario) => {
+    if (isPlayingScenarioAudio) {
+      if (scenarioPlayerRef.current) {
+        scenarioPlayerRef.current.stop();
+      }
+      setIsPlayingScenarioAudio(false);
+      setAudioVolume(0);
+    } else {
+      // Stop live mic if active
+      if (isStreaming && audioManagerRef.current) {
+        audioManagerRef.current.stop();
+        audioManagerRef.current = null;
+        setIsStreaming(false);
+      }
+
+      if (!scenarioPlayerRef.current) {
+        scenarioPlayerRef.current = new ScenarioAudioPlayer(
+          (vol) => setAudioVolume(vol),
+          (playing) => setIsPlayingScenarioAudio(playing),
+          (feats) => setAudioFeatures(feats)
+        );
+      }
+
+      const cfg = scen.ttsVoiceConfig || {};
+      scenarioPlayerRef.current.play(
+        scen.sampleTranscript,
+        cfg.voiceFilter || 'natural',
+        cfg.pitch || 1.0,
+        cfg.rate || 1.0
+      );
+    }
+  };
 
   // Layer 3 Signals (Deepfake, Speaker, Replay)
   const deepfakeResult = computeDeepfakeSignal(
@@ -416,11 +452,14 @@ export default function App() {
     fetchAuditLogs();
   }, [fetchDbStatus, fetchAuditLogs]);
 
-  // Cleanup mic on unmount
+  // Cleanup mic and scenario audio on unmount
   useEffect(() => {
     return () => {
       if (audioManagerRef.current) {
         audioManagerRef.current.stop();
+      }
+      if (scenarioPlayerRef.current) {
+        scenarioPlayerRef.current.stop();
       }
     };
   }, []);
@@ -511,6 +550,8 @@ export default function App() {
                   selectedScenario={selectedScenario}
                   onSelectScenario={handleSelectScenario}
                   audioError={audioError}
+                  isPlayingScenarioAudio={isPlayingScenarioAudio}
+                  onToggleScenarioAudio={handleToggleScenarioAudio}
                 />
 
                 {/* Layer 4: Conversation Intelligence (Gemini NLP) */}

@@ -173,6 +173,12 @@ export interface PreloadedScenario {
   baseSpeakerSim: number;
   baseReplay: number;
   simulatedAudioVariant: string;
+  acousticArtifacts?: string;
+  ttsVoiceConfig?: {
+    pitch?: number;
+    rate?: number;
+    voiceFilter?: 'robot-telephony' | 'synthetic' | 'replay-echo' | 'telephony' | 'distressed' | 'clean-telephony' | 'natural';
+  };
 }
 
 export interface DbStatus {

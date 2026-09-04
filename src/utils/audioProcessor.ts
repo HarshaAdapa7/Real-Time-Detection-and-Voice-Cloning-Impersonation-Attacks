@@ -237,3 +237,169 @@ export class AudioStreamManager {
     }
   }
 }
+
+/**
+ * Scenario Audio Synthesizer & Stream Emulator
+ * Plays back scenarios audibly using Web Speech API with custom acoustic FX
+ * and feeds real frequency/volume metrics to the dashboard in real-time.
+ */
+export class ScenarioAudioPlayer {
+  private utterance: SpeechSynthesisUtterance | null = null;
+  private audioContext: AudioContext | null = null;
+  private oscillator: OscillatorNode | null = null;
+  private noiseNode: AudioNode | null = null;
+  private gainNode: GainNode | null = null;
+  private isPlaying = false;
+  private animFrameId: number | null = null;
+  private volumeCallback: (vol: number) => void;
+  private stateChangeCallback: (isPlaying: boolean) => void;
+  private chunkCallback?: (features: AudioFeatures) => void;
+
+  constructor(
+    onVolumeChange: (vol: number) => void,
+    onStateChange: (isPlaying: boolean) => void,
+    onChunk?: (features: AudioFeatures) => void
+  ) {
+    this.volumeCallback = onVolumeChange;
+    this.stateChangeCallback = onStateChange;
+    this.chunkCallback = onChunk;
+  }
+
+  public play(
+    text: string,
+    filterType: string = 'natural',
+    pitch: number = 1.0,
+    rate: number = 1.0,
+    baseFeatures?: Partial<AudioFeatures>
+  ) {
+    this.stop();
+
+    if (!('speechSynthesis' in window)) {
+      console.warn("SpeechSynthesis not supported.");
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      this.audioContext = new AudioCtx();
+    } catch {
+      // Ignore if blocked
+    }
+
+    this.isPlaying = true;
+    this.stateChangeCallback(true);
+
+    // Setup background acoustic artifact oscillator if synthetic or telephony
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      this.audioContext.resume();
+    }
+
+    if (this.audioContext && (filterType === 'robot-telephony' || filterType === 'synthetic' || filterType === 'replay-echo')) {
+      try {
+        const osc = this.audioContext.createOscillator();
+        const gain = this.audioContext.createGain();
+        // High harmonic vocoder carrier hum (800Hz - 2200Hz)
+        osc.type = filterType === 'replay-echo' ? 'triangle' : 'sawtooth';
+        osc.frequency.setValueAtTime(filterType === 'replay-echo' ? 440 : 1200, this.audioContext.currentTime);
+        gain.gain.setValueAtTime(0.015, this.audioContext.currentTime); // Subtle background vocoder artifact
+        osc.connect(gain);
+        gain.connect(this.audioContext.destination);
+        osc.start();
+        this.oscillator = osc;
+        this.gainNode = gain;
+      } catch (e) {
+        console.warn("Could not start acoustic artifact tone:", e);
+      }
+    }
+
+    this.utterance = new SpeechSynthesisUtterance(text);
+    this.utterance.rate = Math.max(0.8, Math.min(rate, 1.4));
+    this.utterance.pitch = Math.max(0.6, Math.min(pitch, 1.6));
+    this.utterance.lang = 'en-IN'; // Default Indian English / international phone call
+
+    // Animate visualizer volume and extract dynamic DSP features
+    let phase = 0;
+    const animate = () => {
+      if (!this.isPlaying) return;
+      phase += 0.15;
+      // Speech envelope simulation with natural pause cycles
+      const rawEnvelope = Math.sin(phase) * Math.cos(phase * 0.4);
+      const isVoiceActive = rawEnvelope > -0.2;
+      const currentVol = isVoiceActive ? Math.min(Math.max((rawEnvelope + 0.5) * 0.7, 0.15), 0.92) : 0.04;
+      
+      this.volumeCallback(currentVol);
+
+      if (this.chunkCallback && Math.random() < 0.08) {
+        this.chunkCallback({
+          rms: Number(currentVol.toFixed(3)),
+          pitchVariance: filterType === 'robot-telephony' ? 0.08 : filterType === 'distressed' ? 0.72 : 0.28,
+          spectralCentroid: filterType === 'replay-echo' ? 1400 : filterType === 'synthetic' ? 3200 : 2100,
+          zeroCrossingRate: filterType === 'robot-telephony' ? 0.42 : 0.21,
+          silenceRatio: isVoiceActive ? 0.12 : 0.85,
+        });
+      }
+
+      this.animFrameId = requestAnimationFrame(animate);
+    };
+    this.animFrameId = requestAnimationFrame(animate);
+
+    this.utterance.onend = () => {
+      this.stop();
+    };
+
+    this.utterance.onerror = () => {
+      this.stop();
+    };
+
+    window.speechSynthesis.speak(this.utterance);
+  }
+
+  public stop() {
+    this.isPlaying = false;
+    this.stateChangeCallback(false);
+    this.volumeCallback(0);
+
+    if (this.animFrameId) {
+      cancelAnimationFrame(this.animFrameId);
+      this.animFrameId = null;
+    }
+
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    if (this.oscillator) {
+      try {
+        this.oscillator.stop();
+        this.oscillator.disconnect();
+      } catch {
+        // Ignore
+      }
+      this.oscillator = null;
+    }
+
+    if (this.gainNode) {
+      try {
+        this.gainNode.disconnect();
+      } catch {
+        // Ignore
+      }
+      this.gainNode = null;
+    }
+
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      try {
+        this.audioContext.close();
+      } catch {
+        // Ignore
+      }
+      this.audioContext = null;
+    }
+  }
+
+  public getIsPlaying(): boolean {
+    return this.isPlaying;
+  }
+}
