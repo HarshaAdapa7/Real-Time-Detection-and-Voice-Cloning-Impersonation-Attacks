@@ -22,6 +22,7 @@ export interface RunTestOptions {
   languageFilter?: string; // 'all' | 'en' | 'hi' | 'te' | 'ta' | 'kn' | 'ml' | 'mr' | 'bn'
   tenantConfig?: TenantConfig;
   asrEnabledLanguages?: string[];
+  customTestCases?: TestCaseSchema[];
 }
 
 export function runSingleTestCase(
@@ -149,7 +150,7 @@ export function runAllEvaluationTests(options: RunTestOptions = {}): EvaluationR
     asrEnabledLanguages = ['en', 'hi', 'te', 'ta', 'kn'],
   } = options;
 
-  let allTests = [...MULTILINGUAL_TEST_CASES, ...CONTEXT_SWITCH_TEST_CASES];
+  let allTests = [...MULTILINGUAL_TEST_CASES, ...CONTEXT_SWITCH_TEST_CASES, ...(options.customTestCases || [])];
 
   if (categoryFilter !== 'all') {
     allTests = allTests.filter((t) => t.category === categoryFilter);

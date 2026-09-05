@@ -65,14 +65,19 @@ export const DEFAULT_TENANTS: Record<TenantId, TenantConfig> = {
 
 export function evaluatePolicy(
   fusedRiskScore: number,
-  tenantConfig: TenantConfig
+  tenantConfig: TenantConfig,
+  circuitBreakerRule?: string
 ): PolicyDecision {
   const { thresholds, simulatedStepUps } = tenantConfig;
 
   let action: TrustAction;
   let ruleText: string;
 
-  if (fusedRiskScore <= thresholds.allowMax) {
+  if (circuitBreakerRule) {
+    // Critical Threat Circuit-Breaker overrides standard allow/verify
+    action = fusedRiskScore >= 85 ? 'BLOCK' : 'PAUSE_ESCALATE';
+    ruleText = circuitBreakerRule;
+  } else if (fusedRiskScore <= thresholds.allowMax) {
     action = 'ALLOW';
     ruleText = `Risk (${fusedRiskScore}) ≤ Allow Threshold (${thresholds.allowMax})`;
   } else if (fusedRiskScore <= thresholds.verifyMax) {
@@ -98,5 +103,7 @@ export function evaluatePolicy(
     tenantId: tenantConfig.id,
     tenantName: tenantConfig.name,
     triggeredThresholdRule: ruleText,
+    criticalOverrideRule: circuitBreakerRule,
+    circuitBreakerActive: Boolean(circuitBreakerRule),
   };
 }

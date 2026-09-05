@@ -14,6 +14,117 @@
 
 import { NlpSignalResult } from '../types';
 
+export function evaluateTextHeuristics(transcript: string): NlpSignalResult {
+  if (!transcript || transcript.trim().length === 0) {
+    return {
+      transcript: "",
+      socialEngineeringRisk: 0,
+      urgencyScore: 0,
+      secrecyScore: 0,
+      financialRequestDetected: false,
+      otpCredentialRequestDetected: false,
+      detectedCues: ["Awaiting voice input..."],
+      coercionTone: "Silent",
+      reasoning: "No conversation transcript recorded yet.",
+      isRealGemini: false,
+    };
+  }
+
+  const text = transcript;
+  const textLower = transcript.toLowerCase();
+
+  // 1. OTP / Credential Harvesting (English, Hindi, Telugu, Tamil, Kannada, Hinglish)
+  const otpPattern =
+    /(otp|one-time|verification code|security code|auth code|passcode|password|pin number|cvv|credentials|secret code|2fa|authenticator|ओटीपी|ओटिपी|पासवर्ड|पिन|कोड|రహస్య కోడ్|ఓటీపీ|పాస్‌వర్డ్|పిన్|కోడ్|கடவுச்சொல்|ஓடிபி|பின்|குறியீடு|ಗುಪ್ತ ಸಂಖ್ಯೆ|ಒಟಿಪಿ|ಪಾಸ್‌ವರ್ಡ್|ಪಿನ್|രഹസ്യ കോഡ്|otp batao|code bhejo|otp de do|otp share|otp bataiye|otp bataye|code batao|otp cheppandi|code ivvandi|otp pampandi|otp sollunga|code anupunga|otp heli|code kodi)/i;
+  const hasOtp = otpPattern.test(text) || otpPattern.test(textLower);
+
+  // 2. Financial Demand / Wire Transfer / Account Fund Exfiltration
+  const financialPattern =
+    /(transfer|wire|rtgs|neft|imps|upi|send money|pay now|deposit|beneficiary|vendor account|wire transfer|payment of|remit|funds|lakh|crore|rupees|rs\.|settle invoice|पैसे|रुपये|खाता|खाते|ट्रांसफर|डालो|भेजो|ఖాతాకు|రూపాయలు|లక్ష|లక్షలు|పంపండి|బదిలీ|డబ్బులు|பணம்|பரிமாற்றம்|லட்சம்|ரூபாய்|அனுப்பவும்|காசோலை|ಹಣ|ಖಾತೆಗೆ|ವರ್ಗಾವಣೆ|ಕಳುಹಿಸಿ|രൂപ|പണം|paise transfer|khate me|bhejiye|payment kardo|dabbu transfer|account lo veyyandi|panam anupunga|transfer pannunga|hana kaluhisi)/i;
+  const hasFinancial = financialPattern.test(text) || financialPattern.test(textLower);
+
+  // 3. Digital Arrest / Law Enforcement / Legal Threat Coercion (Rampant attack vector)
+  const digitalArrestPattern =
+    /(digital arrest|police|cbi|ed directorate|customs department|cyber crime|crime branch|court summons|fir registered|arrest warrant|warrant issued|account suspended|account blocked|sim blocked|asset seizure|jail|prison|prosecution|arrested|गिरफ्तारी|पुलिस|सीबीआई|वारंट|जेल|खाता ब्लॉक|పోలీస్|అరెస్ట్|కేసు|జైలు|ఖాతా బ్లాక్|கைது|காவல்துறை|நீதிமன்றம்|arrest kar lenge|police bhej raha|block ho jayega|suspend ho jayega|jail ki pampistam|police arrest chestam)/i;
+  const hasDigitalArrest = digitalArrestPattern.test(text) || digitalArrestPattern.test(textLower);
+
+  // 4. Urgency & Panic Induction
+  const urgencyPattern =
+    /(urgent|immediate|right now|within 10 minutes|within 5 minutes|two minutes|immediately|hurry|emergency|critical|asap|fast|quick|lockout|deadline|act now|तुरंत|तत्काल|जल्दी|फटाफट|अभी|ఇప్పుడే|వెంటనే|అత్యవసర|త్వరగా|உடனடியாக|தாமதமின்றி|சீக்கிரம்|விரைவாக|ತಕ್ಷಣವೇ|ತುರ್ತು|വേഗം|ഉടൻ|jaldi karo|turant bhejo|abhi ke abhi|ventane|ippude|tvaraga|udane|seekiram|thakshana)/i;
+  const hasUrgency = urgencyPattern.test(text) || urgencyPattern.test(textLower);
+
+  // 5. Secrecy & Anti-Verification Tactics
+  const secrecyPattern =
+    /(confidential|secret|do not tell|don't inform|between us|private line|keep this quiet|don't verify|skip callback|do not hang up|stay on line|don't tell anyone|गोपनीय|मत बताना|गुप्त|రహస్యమైన|చెప్పవద్దు|ఎవరికీ చెప్పొద్దు|ரகசியம்|கூற வேண்டாம்|ಯಾರಿಗೂ ಹೇಳಬೇಡಿ|രഹസ്യമായി|kisi ko mat batana|secret hai|line mat kaatna|phone mat kaato|evariki cheppoddu|secret ga unchandi|call cut cheyoddu)/i;
+  const hasSecrecy = secrecyPattern.test(text) || secrecyPattern.test(textLower);
+
+  // 6. Authority Impersonation
+  const authorityPattern =
+    /(it security|cfo|ceo|director|cyber cell|security department|bank manager|police inspector|enforcement officer|compliance officer|headquarters|सीईओ|सीएफओ|प्रबंधक|పోలీస్|మేనేజర్|అధికారి|இயக்குனர்|அதிகாரி|ಅಧಿಕಾರಿ)/i;
+  const hasAuthority = authorityPattern.test(text) || authorityPattern.test(textLower);
+
+  let score = 10;
+  const cues: string[] = [];
+
+  if (hasOtp) {
+    score = 96;
+    cues.push("🚨 P0 CRITICAL: Sensitive OTP / Passcode / 2FA Credential Solicitation detected");
+  } else if (hasDigitalArrest) {
+    score = 92;
+    cues.push("🚨 P0 CRITICAL: Law Enforcement / Digital Arrest Extortion & Arrest Threat detected");
+  } else if (hasFinancial && hasUrgency) {
+    score = 90;
+    cues.push("🚨 P0 CRITICAL: High-Urgency Coercive Financial Wire / Account Transfer demand");
+  } else if (hasFinancial && hasAuthority) {
+    score = 86;
+    cues.push("⚠️ HIGH THREAT: Authority Impersonation requesting unauthorized financial disbursement");
+  } else if (hasFinancial) {
+    score = 76;
+    cues.push("⚠️ FINANCIAL RISK: Direct funds transfer / remittance instructions detected");
+  } else if (hasSecrecy && hasUrgency) {
+    score = 78;
+    cues.push("⚠️ MANIPULATION: Combined high-pressure secrecy isolation & immediate time deadline");
+  } else if (hasSecrecy) {
+    score = 65;
+    cues.push("⚠️ ISOLATION: Explicit demand to withhold information from verification channels");
+  } else if (hasUrgency) {
+    score = 52;
+    cues.push("⚠️ URGENCY: Artificial panic induction and accelerated action window");
+  } else if (hasAuthority) {
+    score = 45;
+    cues.push("ℹ️ AUTHORITY: Executive or security credentials asserted");
+  }
+
+  const coercionTone =
+    hasOtp || hasDigitalArrest
+      ? "Aggressive Extortion / Phishing"
+      : hasUrgency && hasSecrecy
+      ? "Coercive & Manipulative"
+      : hasUrgency
+      ? "High Urgency Panic"
+      : hasFinancial
+      ? "Transactional Demand"
+      : "Standard";
+
+  const reasoning =
+    cues.length > 0
+      ? `Real-time multi-lingual conversational analyzer: ${cues[0]}`
+      : "Standard natural conversational flow without security flags.";
+
+  return {
+    transcript,
+    socialEngineeringRisk: Math.min(Math.max(score, 5), 99),
+    urgencyScore: hasUrgency ? 88 : hasDigitalArrest ? 85 : 15,
+    secrecyScore: hasSecrecy ? 90 : 10,
+    financialRequestDetected: hasFinancial,
+    otpCredentialRequestDetected: hasOtp,
+    detectedCues: cues.length > 0 ? cues : ["Standard natural conversational cadence"],
+    coercionTone,
+    reasoning,
+    isRealGemini: false,
+  };
+}
+
 export async function evaluateConversationRisk(
   transcript: string,
   claimedContext?: {
@@ -23,18 +134,7 @@ export async function evaluateConversationRisk(
   }
 ): Promise<NlpSignalResult> {
   if (!transcript || transcript.trim().length === 0) {
-    return {
-      transcript: "",
-      socialEngineeringRisk: 0,
-      urgencyScore: 0,
-      secrecyScore: 0,
-      financialRequestDetected: false,
-      otpCredentialRequestDetected: false,
-      detectedCues: ["Awaiting speech input..."],
-      coercionTone: "Silent",
-      reasoning: "No conversation transcript recorded yet.",
-      isRealGemini: false,
-    };
+    return evaluateTextHeuristics("");
   }
 
   try {
@@ -66,31 +166,6 @@ export async function evaluateConversationRisk(
     };
   } catch (err) {
     console.warn("Client fallback for NLP evaluation:", err);
-    // Instant fallback
-    const textLower = transcript.toLowerCase();
-    const hasUrgency = /(urgent|immediate|right now|hurry|emergency|asap|fast|quick|critical)/i.test(textLower);
-    const hasSecrecy = /(secret|don't tell|between us|confidential|do not tell anyone|private line|quiet)/i.test(textLower);
-    const hasFinancial = /(transfer|wire|neft|rtgs|rupees|rs\.|lakh|crore|send money|account|beneficiary|payment)/i.test(textLower);
-    const hasCredentials = /(otp|pin|password|cvv|credentials|card number|auth code|verification code)/i.test(textLower);
-
-    let score = 20;
-    const cues: string[] = [];
-    if (hasUrgency) { score += 25; cues.push("Urgent delivery demand"); }
-    if (hasSecrecy) { score += 30; cues.push("Secrecy request"); }
-    if (hasFinancial) { score += 20; cues.push("Financial fund transfer intent"); }
-    if (hasCredentials) { score += 30; cues.push("OTP / Credential harvesting"); }
-
-    return {
-      transcript,
-      socialEngineeringRisk: Math.min(score, 95),
-      urgencyScore: hasUrgency ? 80 : 15,
-      secrecyScore: hasSecrecy ? 85 : 10,
-      financialRequestDetected: hasFinancial,
-      otpCredentialRequestDetected: hasCredentials,
-      detectedCues: cues.length > 0 ? cues : ["Standard natural phrasing"],
-      coercionTone: hasUrgency ? "High Urgency" : "Standard",
-      reasoning: "Local fallback analysis: Identified conversational indicators based on keyword extraction.",
-      isRealGemini: false,
-    };
+    return evaluateTextHeuristics(transcript);
   }
 }

@@ -14,20 +14,52 @@ export interface AudioProcessorCallbacks {
   onTranscript: (text: string, isFinal: boolean) => void;
   onVolumeChange: (volume: number) => void;
   onError: (error: string) => void;
+  onAudioChunkReady?: (blob: Blob, base64Url: string, durationSeconds: number) => void;
+  onLanguageDetected?: (lang: string) => void;
+  onLiveFeatures?: (features: AudioFeatures) => void;
 }
 
 export class AudioStreamManager {
   private audioContext: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
   private analyser: AnalyserNode | null = null;
+  private mediaRecorder: MediaRecorder | null = null;
+  private recordedChunks: Blob[] = [];
   private recognition: any = null;
   private isRunning = false;
+  private isPaused = false;
   private chunkIntervalTimer: any = null;
   private chunkCounter = 0;
   private callbacks: AudioProcessorCallbacks;
+  private activeLanguage = 'en-IN';
+  private pendingInterimText = '';
+  private interimCommitTimer: any = null;
+  private recognitionRestartTimer: any = null;
+  private speechWatchdogTimer: any = null;
+  private lastVoiceActivityTime = 0;
+  private lastTranscriptTime = Date.now();
+  private isTranscribingChunk = false;
 
   constructor(callbacks: AudioProcessorCallbacks) {
     this.callbacks = callbacks;
+  }
+
+  public setLanguage(langCode: string) {
+    this.activeLanguage = langCode.includes('-') ? langCode : `${langCode}-IN`;
+    if (this.recognition) {
+      try {
+        this.recognition.lang = this.activeLanguage;
+        if (this.isRunning && !this.isPaused) {
+          try {
+            this.recognition.stop();
+          } catch {
+            // Handled by onend
+          }
+        }
+      } catch {
+        // Ignored
+      }
+    }
   }
 
   public async startMicrophone(): Promise<boolean> {
@@ -36,7 +68,7 @@ export class AudioStreamManager {
         audio: {
           echoCancellation: true,
           noiseSuppression: false, // Keep raw noise characteristics for detection
-          autoGainControl: false,
+          autoGainControl: true,
           sampleRate: 16000,
         },
       });
@@ -45,20 +77,40 @@ export class AudioStreamManager {
       this.audioContext = new AudioCtx({ sampleRate: 16000 });
 
       const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+
+      // Pre-amplifier and DynamicsCompressor for enhanced listening sensitivity & clarity
+      const gainNode = this.audioContext.createGain();
+      gainNode.gain.setValueAtTime(1.8, this.audioContext.currentTime);
+
+      const compressor = this.audioContext.createDynamicsCompressor();
+      compressor.threshold.setValueAtTime(-24, this.audioContext.currentTime);
+      compressor.knee.setValueAtTime(30, this.audioContext.currentTime);
+      compressor.ratio.setValueAtTime(12, this.audioContext.currentTime);
+      compressor.attack.setValueAtTime(0.003, this.audioContext.currentTime);
+      compressor.release.setValueAtTime(0.25, this.audioContext.currentTime);
+
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = 1024;
       this.analyser.smoothingTimeConstant = 0.3;
 
-      source.connect(this.analyser);
+      source.connect(gainNode);
+      gainNode.connect(compressor);
+      compressor.connect(this.analyser);
+
       this.isRunning = true;
+      this.isPaused = false;
       this.chunkCounter = 0;
+      this.recordedChunks = [];
+
+      // Start MediaRecorder for capturing real audio chunks
+      this.initMediaRecorder();
 
       // Start Web Speech API for real-time transcription
       this.initSpeechRecognition();
 
       // Start chunk evaluation loop every 2.5 seconds
       this.chunkIntervalTimer = setInterval(() => {
-        if (!this.isRunning || !this.analyser) return;
+        if (!this.isRunning || this.isPaused || !this.analyser) return;
         this.chunkCounter++;
         const features = this.extractCurrentFeatures();
         this.callbacks.onChunk(features, this.chunkCounter);
@@ -75,6 +127,95 @@ export class AudioStreamManager {
     }
   }
 
+  private initMediaRecorder() {
+    if (!this.mediaStream || typeof MediaRecorder === 'undefined') return;
+
+    try {
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+        ? 'audio/mp4'
+        : '';
+
+      const options = mimeType ? { mimeType } : {};
+      this.mediaRecorder = new MediaRecorder(this.mediaStream, options);
+
+      this.mediaRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          this.recordedChunks.push(event.data);
+          if (this.callbacks.onAudioChunkReady) {
+            const chunkBlob = new Blob([event.data], { type: event.data.type || 'audio/webm' });
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const dataUrl = reader.result as string;
+              this.callbacks.onAudioChunkReady?.(chunkBlob, dataUrl, 2.5);
+            };
+            reader.readAsDataURL(chunkBlob);
+          }
+        }
+      };
+
+      // Slice recording every 2.5s
+      this.mediaRecorder.start(2500);
+    } catch (recErr) {
+      console.warn("MediaRecorder could not start (will proceed with audio analysis):", recErr);
+    }
+  }
+
+  public pauseMicrophone() {
+    this.isPaused = true;
+    if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+      try {
+        this.mediaRecorder.pause();
+      } catch (e) {
+        console.warn("Error pausing MediaRecorder:", e);
+      }
+    }
+    if (this.recognition) {
+      try {
+        this.recognition.stop();
+      } catch (e) {
+        // Ignored
+      }
+    }
+  }
+
+  public resumeMicrophone() {
+    this.isPaused = false;
+    if (this.mediaRecorder && this.mediaRecorder.state === 'paused') {
+      try {
+        this.mediaRecorder.resume();
+      } catch (e) {
+        console.warn("Error resuming MediaRecorder:", e);
+      }
+    }
+    if (this.recognition && this.isRunning) {
+      try {
+        this.recognition.start();
+      } catch (e) {
+        // Ignored
+      }
+    }
+  }
+
+  public getRecordedBlob(): Blob | null {
+    if (this.recordedChunks.length === 0) return null;
+    const type = this.recordedChunks[0]?.type || 'audio/webm';
+    return new Blob(this.recordedChunks, { type });
+  }
+
+  public async getRecordedAudioDataUrl(): Promise<string> {
+    const blob = this.getRecordedBlob();
+    if (!blob) return '';
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.readAsDataURL(blob);
+    });
+  }
+
   private initSpeechRecognition() {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -88,9 +229,10 @@ export class AudioStreamManager {
       this.recognition = new SpeechRecognition();
       this.recognition.continuous = true;
       this.recognition.interimResults = true;
-      this.recognition.lang = 'en-IN'; // Default Indian English / Multilingual context
+      this.recognition.lang = this.activeLanguage || 'en-IN'; // Multilingual ASR context
 
       this.recognition.onresult = (event: any) => {
+        this.lastTranscriptTime = Date.now();
         let interim = '';
         let final = '';
         for (let i = event.resultIndex; i < event.results.length; ++i) {
@@ -100,24 +242,70 @@ export class AudioStreamManager {
             interim += event.results[i][0].transcript;
           }
         }
-        const text = (final || interim).trim();
-        if (text) {
-          this.callbacks.onTranscript(text, Boolean(final));
+        
+        const trimmedFinal = final.trim();
+        const trimmedInterim = interim.trim();
+
+        if (trimmedFinal) {
+          if (this.interimCommitTimer) {
+            clearTimeout(this.interimCommitTimer);
+            this.interimCommitTimer = null;
+          }
+          this.pendingInterimText = '';
+          this.callbacks.onTranscript(trimmedFinal, true);
+        } else if (trimmedInterim) {
+          this.pendingInterimText = trimmedInterim;
+          this.callbacks.onTranscript(trimmedInterim, false);
+
+          // Auto-commit timer: If speaker pauses for 1000ms, commit as a finalized turn to prevent dropped speech
+          if (this.interimCommitTimer) {
+            clearTimeout(this.interimCommitTimer);
+          }
+          this.interimCommitTimer = setTimeout(() => {
+            if (this.pendingInterimText && this.isRunning && !this.isPaused) {
+              const textToCommit = this.pendingInterimText;
+              this.pendingInterimText = '';
+              this.callbacks.onTranscript(textToCommit, true);
+            }
+          }, 1100);
         }
       };
 
       this.recognition.onerror = (e: any) => {
-        console.warn("SpeechRecognition error:", e);
+        // Non-fatal error recovery for no-speech or network hiccups
+        if (e?.error === 'no-speech' || e?.error === 'network') {
+          // Normal pause in speech, will auto-recover
+          return;
+        }
+        console.warn("SpeechRecognition notice:", e?.error || e);
       };
 
       this.recognition.onend = () => {
-        if (this.isRunning && this.recognition) {
-          try {
-            this.recognition.start();
-          } catch {
-            // Already started or restarting
-          }
+        // Flush any pending text before restarting
+        if (this.pendingInterimText) {
+          const textToCommit = this.pendingInterimText;
+          this.pendingInterimText = '';
+          this.callbacks.onTranscript(textToCommit, true);
         }
+
+        // Resilient debounce restart (prevents InvalidStateError in Chromium)
+        if (this.recognitionRestartTimer) {
+          clearTimeout(this.recognitionRestartTimer);
+        }
+        this.recognitionRestartTimer = setTimeout(() => {
+          if (this.isRunning && !this.isPaused) {
+            try {
+              if (this.recognition) {
+                this.recognition.start();
+              } else {
+                this.initSpeechRecognition();
+              }
+            } catch {
+              // If start threw InvalidStateError or object is stale, recreate instance
+              this.initSpeechRecognition();
+            }
+          }
+        }, 300);
       };
 
       this.recognition.start();
@@ -129,6 +317,8 @@ export class AudioStreamManager {
   private startVolumeLoop() {
     if (!this.analyser) return;
     const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+    let lastFeatureEmit = 0;
+    let lastWatchdogCheck = 0;
 
     const check = () => {
       if (!this.isRunning || !this.analyser) return;
@@ -142,10 +332,85 @@ export class AudioStreamManager {
       const normalizedVol = Math.min(avg / 128, 1);
       this.callbacks.onVolumeChange(normalizedVol);
 
+      // Track voice activity if speech energy detected
+      const now = performance.now();
+      const wallNow = Date.now();
+      if (normalizedVol > 0.07) {
+        this.lastVoiceActivityTime = wallNow;
+      }
+
+      // Speech Recognition Watchdog: if user is speaking but Web Speech API is silent for >3.5s
+      if (now - lastWatchdogCheck > 2500) {
+        lastWatchdogCheck = now;
+        const speechActiveRecently = wallNow - this.lastVoiceActivityTime < 2000;
+        const speechStalled = wallNow - this.lastTranscriptTime > 4000;
+
+        if (speechActiveRecently && speechStalled && !this.isTranscribingChunk && this.isRunning && !this.isPaused) {
+          // Attempt neural transcription via Gemini for the recent audio buffer
+          this.transcribeRecentAudioChunk();
+        }
+      }
+
+      // Periodically emit real-time features every 180ms for fluid visual telemetry
+      if (this.callbacks.onLiveFeatures && now - lastFeatureEmit > 180) {
+        lastFeatureEmit = now;
+        const liveFeats = this.extractCurrentFeatures();
+        this.callbacks.onLiveFeatures(liveFeats);
+      }
+
       requestAnimationFrame(check);
     };
 
     requestAnimationFrame(check);
+  }
+
+  /**
+   * Neural Gemini Speech-to-Text for live audio chunks when Web Speech drops regional words
+   */
+  public async transcribeRecentAudioChunk(explicitBlob?: Blob, langHint?: string): Promise<void> {
+    if (this.isTranscribingChunk || !this.isRunning || this.isPaused) return;
+
+    try {
+      this.isTranscribingChunk = true;
+      const blob = explicitBlob || this.getRecordedBlob();
+      if (!blob || blob.size < 4000) return; // Ignore empty / click noise
+
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        try {
+          const base64Url = reader.result as string;
+          const targetLang = langHint || this.activeLanguage.split('-')[0] || 'auto';
+
+          const res = await fetch('/api/transcribe-audio', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              audio: base64Url,
+              mimeType: blob.type || 'audio/webm',
+              languageHint: targetLang,
+            }),
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            if (data.isSpeechDetected && data.transcript && data.transcript.trim()) {
+              this.lastTranscriptTime = Date.now();
+              this.callbacks.onTranscript(data.transcript.trim(), true);
+              if (data.detectedLanguage && this.callbacks.onLanguageDetected) {
+                this.callbacks.onLanguageDetected(data.detectedLanguage);
+              }
+            }
+          }
+        } catch (postErr) {
+          console.warn("Neural ASR fallback network warn:", postErr);
+        } finally {
+          this.isTranscribingChunk = false;
+        }
+      };
+      reader.readAsDataURL(blob);
+    } catch {
+      this.isTranscribingChunk = false;
+    }
   }
 
   public extractCurrentFeatures(): AudioFeatures {
@@ -215,9 +480,36 @@ export class AudioStreamManager {
 
   public stop() {
     this.isRunning = false;
+    this.isPaused = false;
+    if (this.recognitionRestartTimer) {
+      clearTimeout(this.recognitionRestartTimer);
+      this.recognitionRestartTimer = null;
+    }
+    if (this.speechWatchdogTimer) {
+      clearTimeout(this.speechWatchdogTimer);
+      this.speechWatchdogTimer = null;
+    }
+    if (this.interimCommitTimer) {
+      clearTimeout(this.interimCommitTimer);
+      this.interimCommitTimer = null;
+    }
+    // Final flush of any pending spoken utterance
+    if (this.pendingInterimText) {
+      const textToCommit = this.pendingInterimText;
+      this.pendingInterimText = '';
+      this.callbacks.onTranscript(textToCommit, true);
+    }
     if (this.chunkIntervalTimer) {
       clearInterval(this.chunkIntervalTimer);
       this.chunkIntervalTimer = null;
+    }
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      try {
+        this.mediaRecorder.stop();
+      } catch (e) {
+        // Ignored
+      }
+      this.mediaRecorder = null;
     }
     if (this.recognition) {
       try {

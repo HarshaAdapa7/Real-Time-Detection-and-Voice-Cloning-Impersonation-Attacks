@@ -1,6 +1,8 @@
 import React from 'react';
-import { Shield, Building2, Landmark, Info, Sliders, History, Code2 } from 'lucide-react';
+import { Shield, Building2, Landmark, Info, Sliders, History, Code2, Mic, Database } from 'lucide-react';
 import { TenantConfig, TenantId } from '../types';
+
+export type AppTab = 'firewall' | 'live_intel' | 'evaluation_library' | 'api' | 'audit';
 
 interface HeaderProps {
   currentTenant: TenantConfig;
@@ -9,8 +11,8 @@ interface HeaderProps {
   onOpenAuditLog: () => void;
   onOpenDisclosures: () => void;
   onOpenApiInspector: () => void;
-  activeTab: 'firewall' | 'api' | 'audit';
-  setActiveTab: (tab: 'firewall' | 'api' | 'audit') => void;
+  activeTab: AppTab;
+  setActiveTab: (tab: AppTab) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -39,7 +41,7 @@ export const Header: React.FC<HeaderProps> = ({
               </h1>
             </div>
             <p className="text-xs text-slate-500">
-              Multi-signal authenticity, conversation intent & context evaluation for sensitive action authorization
+              Live microphone capture, real-time captioning, acoustic deepfake detection & conversational context evaluation
             </p>
           </div>
         </div>
@@ -47,7 +49,7 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Action Controls & Navigation */}
         <div className="flex flex-wrap items-center gap-2.5">
           {/* Main View Tabs */}
-          <div className="bg-slate-100 p-1 rounded-lg border border-slate-200/80 flex text-xs">
+          <div className="bg-slate-100 p-1 rounded-lg border border-slate-200/80 flex flex-wrap text-xs">
             <button
               id="nav-tab-firewall"
               onClick={() => setActiveTab('firewall')}
@@ -58,6 +60,30 @@ export const Header: React.FC<HeaderProps> = ({
               }`}
             >
               Firewall Pipeline
+            </button>
+            <button
+              id="nav-tab-live-intel"
+              onClick={() => setActiveTab('live_intel')}
+              className={`px-3 py-1.5 rounded-md font-medium transition-all flex items-center gap-1.5 ${
+                activeTab === 'live_intel'
+                  ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+              }`}
+            >
+              <Mic className="w-3.5 h-3.5 text-rose-500" />
+              Live Voice Capture
+            </button>
+            <button
+              id="nav-tab-evaluation-library"
+              onClick={() => setActiveTab('evaluation_library')}
+              className={`px-3 py-1.5 rounded-md font-medium transition-all flex items-center gap-1.5 ${
+                activeTab === 'evaluation_library'
+                  ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+              }`}
+            >
+              <Database className="w-3.5 h-3.5 text-indigo-500" />
+              Evaluation Library
             </button>
             <button
               id="nav-tab-api"

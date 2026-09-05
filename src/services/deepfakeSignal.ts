@@ -16,19 +16,42 @@ import { AudioFeatures, DeepfakeSignalResult } from '../types';
 export function computeDeepfakeSignal(
   features: AudioFeatures,
   scenarioBaseScore?: number,
-  jitterSeed = 0
+  jitterSeed = 0,
+  isLiveMic = false
 ): DeepfakeSignalResult {
-  // If a scenario preset is selected, use it as the anchor
+  // If in live mic mode, compute purely from the microphone's real acoustic features
   let estimatedProbability: number;
 
-  if (scenarioBaseScore !== undefined) {
+  if (isLiveMic) {
+    // Dynamic real-time biological voice analysis:
+    // Natural human speech has pitch micro-tremor (pitchVariance ~ 0.18 - 0.50),
+    // normal vocal fold spectral centroid (1200 - 2400 Hz), and dynamic energy.
+    // Neural TTS/vocoders exhibit unnatural prosodic flatness (pitchVariance < 0.12)
+    // or phase discontinuities with high spectral centroids (> 2800 Hz).
+    const isVoicing = features.rms > 0.02;
+    const isUnnaturallySmooth = features.pitchVariance < 0.12 && isVoicing;
+    const isHighSpectralCentroid = features.spectralCentroid > 2800;
+    const isZeroCrossingUniform = features.zeroCrossingRate > 0.38;
+
+    if (!isVoicing) {
+      // Background / ambient silence
+      estimatedProbability = 10;
+    } else {
+      let base = 12; // Natural human baseline
+      if (isUnnaturallySmooth) base += 45;
+      if (isHighSpectralCentroid) base += 25;
+      if (isZeroCrossingUniform) base += 15;
+
+      // Small dynamic micro-variance based on real vocal fluctuation
+      const dynamicFlux = Math.round(features.pitchVariance * 18 - 5);
+      estimatedProbability = Math.round(Math.min(Math.max(base + dynamicFlux, 4), 95));
+    }
+  } else if (scenarioBaseScore !== undefined) {
     // Inject small deterministic natural variance (±4%) based on real audio flux
     const naturalFlux = (features.pitchVariance * 10) % 8 - 4;
     estimatedProbability = Math.min(Math.max(scenarioBaseScore + naturalFlux, 2), 99);
   } else {
     // Calculate heuristics from audio features:
-    // Synthetic TTS often displays unnaturally low pitch variance (flat prosody)
-    // or unusually uniform spectral centroids compared to human speech.
     const isUnnaturallySmooth = features.pitchVariance < 0.15 && features.rms > 0.05;
     const isHighSpectralCentroid = features.spectralCentroid > 2800;
     const isZeroCrossingUniform = features.zeroCrossingRate > 0.35;

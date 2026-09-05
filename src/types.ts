@@ -127,6 +127,8 @@ export interface RiskFusionResult {
   };
   dominantRiskFactor: string;
   formulaString: string;
+  circuitBreakerTriggered?: string;
+  isCircuitBreakerActive?: boolean;
 }
 
 export interface PolicyDecision {
@@ -136,6 +138,8 @@ export interface PolicyDecision {
   tenantId: TenantId;
   tenantName: string;
   triggeredThresholdRule: string;
+  criticalOverrideRule?: string;
+  circuitBreakerActive?: boolean;
 }
 
 export interface AuditRecord {
@@ -208,6 +212,8 @@ export interface DbStatus {
     tenant_policies: number;
     enrolled_identities: number;
     audit_trail_events: number;
+    live_sessions?: number;
+    evaluation_audio_library?: number;
   };
   message: string;
   error?: string;
@@ -333,4 +339,94 @@ export interface EvaluationReport {
   test_results: TestCaseSchema[];
   execution_timestamp: string;
 }
+
+// ============================================================
+// Live Voice Captioning, Capture & Evaluation Dataset Types
+// ============================================================
+
+export interface LiveSessionRecord {
+  session_id: string;
+  source: 'LIVE_MICROPHONE';
+  start_time: string;
+  end_time: string | null;
+  status: 'active' | 'paused' | 'stopped';
+  total_duration: number; // in seconds
+  detected_languages: string[];
+  final_risk_score: number;
+  final_decision: TrustAction;
+  turns_count: number;
+  created_at?: string;
+}
+
+export interface AudioRecord {
+  audio_id: string;
+  session_id: string;
+  audio_file_path?: string; // storage ref or data URL
+  chunk_number: number;
+  start_timestamp: string;
+  end_timestamp: string;
+  duration: number; // seconds
+  sample_rate: number;
+  format: string;
+  source: 'LIVE_MICROPHONE';
+}
+
+export interface LiveCaptionRecord {
+  caption_id: string;
+  session_id: string;
+  turn_number: number;
+  timestamp: string;
+  transcript: string;
+  detected_language: string;
+  caption_status: 'interim' | 'final';
+}
+
+export interface AnalysisResultRecord {
+  session_id: string;
+  turn_number: number;
+  deepfake_score: number;
+  speaker_similarity: number;
+  replay_score: number;
+  nlp_score: number;
+  context: string;
+  previous_context: string | null;
+  context_switch: boolean;
+  language_switch: boolean;
+  risk_score: number;
+  decision: TrustAction;
+  timestamp?: string;
+}
+
+export type LabelStatus = 'UNVERIFIED' | 'VERIFIED' | 'REJECTED';
+
+export interface EvaluationAudioRecord {
+  evaluation_audio_id: string;
+  source: 'LIVE_MICROPHONE' | 'SYNTHETIC TEST AUDIO' | 'MANIPULATED TEST AUDIO';
+  session_id: string;
+  audio_reference?: string; // audio data URI or playback blob
+  language: string;
+  duration: string; // e.g. "00:18"
+  detected_contexts: string[];
+  deepfake_prediction: string; // e.g. "Human Voice" or "Deepfake Clone"
+  prediction_confidence: number; // 0.0 to 1.0
+  label_status: LabelStatus;
+  verified_label: boolean;
+  expected_decision?: TrustAction;
+  expected_risk_level?: RiskLevel;
+  expected_context_flow?: string[];
+  added_to_evaluation_list: boolean;
+  added_to_test_cases?: boolean;
+  test_case_id?: string;
+  transcript: string;
+  turns?: {
+    turn_number: number;
+    text: string;
+    language: string;
+    context: string;
+    risk: number;
+    decision: TrustAction;
+  }[];
+  created_at: string;
+}
+
 

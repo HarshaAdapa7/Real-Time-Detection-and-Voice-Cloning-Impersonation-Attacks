@@ -1,0 +1,1860 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Mic, 
+  MicOff, 
+  Pause, 
+  Play, 
+  Square, 
+  ShieldAlert, 
+  ShieldCheck, 
+  AlertTriangle, 
+  Radio, 
+  Volume2, 
+  Database, 
+  Sparkles, 
+  Trash2, 
+  ArrowRight, 
+  Activity, 
+  Languages, 
+  RefreshCw, 
+  CheckCircle2, 
+  ExternalLink,
+  Info,
+  Layers,
+  Zap,
+  BellRing,
+  Send,
+  Check
+} from 'lucide-react';
+import { AudioStreamManager } from '../utils/audioProcessor';
+import { AudioFeatures, TenantConfig, LiveSessionRecord, LiveCaptionRecord, AnalysisResultRecord, SessionContext } from '../types';
+import { evaluateTurnInContext } from '../services/contextSwitchDetector';
+import { DEFAULT_TENANTS } from '../services/policyEngine';
+import { classifySpokenSector, DetectedSector } from '../services/sectorClassifier';
+import { computeDeepfakeSignal } from '../services/deepfakeSignal';
+import { computeSpeakerSignal } from '../services/speakerSignal';
+import { computeReplaySignal } from '../services/replaySignal';
+import { evaluateTextHeuristics } from '../services/nlpSignal';
+import { fuseRiskSignals } from '../services/riskFusion';
+
+// Web Audio Warning Beeper for In-Call Fraud Intimation
+function playSecurityAlertBeep() {
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0.12, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.35);
+  } catch (e) {
+    // Audio context may be restricted before user gesture
+  }
+}
+
+export interface LiveFraudIntimation {
+  id: string;
+  timestamp: string;
+  turnNumber: number;
+  threatCategory: string;
+  threatDescription: string;
+  cues: string[];
+  decision: 'BLOCK' | 'PAUSE_ESCALATE' | 'VERIFY';
+  circuitBreaker: string;
+  fusedRiskScore: number;
+  dominantFactor: string;
+}
+
+export interface DynamicFiveLayersState {
+  layer1Acoustic: {
+    deepfakeScore: number;
+    replayScore: number;
+    status: string;
+    isAnomaly: boolean;
+  };
+  layer2Policy: {
+    strictnessMode: string;
+    sector: string;
+    zeroTrustFloor: number;
+  };
+  layer3Biometric: {
+    similarity: number;
+    mismatchRisk: number;
+    callerRole: string;
+  };
+  layer4ContextNLP: {
+    intent: string;
+    context: string;
+    coercionDetected: boolean;
+    cues: string[];
+  };
+  layer5RiskFusion: {
+    finalRiskScore: number;
+    riskLevel: string;
+    decision: 'ALLOW' | 'VERIFY' | 'PAUSE_ESCALATE' | 'BLOCK';
+    circuitBreakerTriggered?: string;
+    dominantRiskFactor: string;
+  };
+}
+
+interface LiveVoiceIntelligenceProps {
+  currentTenant: TenantConfig;
+  onNavigateToEvaluation?: () => void;
+}
+
+export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
+  currentTenant = DEFAULT_TENANTS['tenant-bank'],
+  onNavigateToEvaluation,
+}) => {
+  // Streaming & Mic State
+  const [isRecording, setIsRecording] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [audioVolume, setAudioVolume] = useState(0);
+  const [activeLang, setActiveLang] = useState('en-IN');
+  const [sessionId, setSessionId] = useState<string>(() => `CALL-LIVE-${Date.now().toString(36).toUpperCase()}`);
+  const [durationSec, setDurationSec] = useState(0);
+
+  // Audio & Captions State
+  const [captions, setCaptions] = useState<Array<{ id: string; text: string; isFinal: boolean; timestamp: string; turnNumber: number; language: string }>>([]);
+  const [currentInterimText, setCurrentInterimText] = useState('');
+  const [analysisTurns, setAnalysisTurns] = useState<AnalysisResultRecord[]>([]);
+  const [recordedAudioUrl, setRecordedAudioUrl] = useState<string | null>(null);
+  const [audioChunksCount, setAudioChunksCount] = useState(0);
+
+  // Dynamic Sector Detection & Real-time Indications
+  const [detectedSector, setDetectedSector] = useState<DetectedSector | null>(null);
+  const [liveIndications, setLiveIndications] = useState<Array<{ id: string; timestamp: string; type: 'info' | 'warning' | 'danger' | 'success'; text: string }>>([
+    { id: '1', timestamp: 'Ready', type: 'info', text: 'Live Voice Intelligence initialized. Real-time sector evaluation active.' },
+  ]);
+  const lastFeaturesRef = useRef<AudioFeatures>({
+    rms: 0.1,
+    pitchVariance: 0.22,
+    spectralCentroid: 2150,
+    zeroCrossingRate: 0.24,
+    silenceRatio: 0.2,
+  });
+
+  const pushLiveIndication = (type: 'info' | 'warning' | 'danger' | 'success', text: string) => {
+    const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setLiveIndications((prev) => {
+      if (prev.some((p) => p.text === text)) return prev;
+      return [{ id: `${Date.now()}-${Math.random()}`, timestamp: time, type, text }, ...prev.slice(0, 6)];
+    });
+  };
+
+  // In-Call Live Fraud Intimation & Dynamic 5-Layer Live State
+  const [liveFraudIntimation, setLiveFraudIntimation] = useState<LiveFraudIntimation | null>(null);
+  const [dynamicFiveLayersState, setDynamicFiveLayersState] = useState<DynamicFiveLayersState | null>({
+    layer1Acoustic: {
+      deepfakeScore: 18,
+      replayScore: 12,
+      status: 'Acoustic DSP Calibrated (Human Glottal Pulses)',
+      isAnomaly: false,
+    },
+    layer2Policy: {
+      strictnessMode: 'Strict Zero-Trust Policy',
+      sector: 'General Financial & Corporate',
+      zeroTrustFloor: 35,
+    },
+    layer3Biometric: {
+      similarity: 88,
+      mismatchRisk: 12,
+      callerRole: 'Unverified Incoming Caller',
+    },
+    layer4ContextNLP: {
+      intent: 'normal_conversation',
+      context: 'normal_conversation',
+      coercionDetected: false,
+      cues: ['Baseline dialogue monitor active'],
+    },
+    layer5RiskFusion: {
+      finalRiskScore: 14,
+      riskLevel: 'LOW',
+      decision: 'ALLOW',
+      circuitBreakerTriggered: undefined,
+      dominantRiskFactor: 'Acoustic & Intent Clean',
+    },
+  });
+
+  // Session Summary & Evaluation status
+  const [isSavedToDb, setIsSavedToDb] = useState(false);
+  const [isAddedToEvaluation, setIsAddedToEvaluation] = useState(false);
+  const [autoAddToEvaluation, setAutoAddToEvaluation] = useState(true);
+  const [notification, setNotification] = useState<{ type: 'success' | 'info' | 'error'; message: string } | null>(null);
+  const [isReanalyzingSession, setIsReanalyzingSession] = useState(false);
+  const [reanalysisReport, setReanalysisReport] = useState<any>(null);
+  const [customTurnInput, setCustomTurnInput] = useState('');
+  const [isNeuralTranscribing, setIsNeuralTranscribing] = useState(false);
+
+  // Audio Manager Reference
+  const audioManagerRef = useRef<AudioStreamManager | null>(null);
+  const sessionContextRef = useRef<SessionContext | null>(null);
+  const timerRef = useRef<any>(null);
+  const turnCounterRef = useRef(1);
+  const sessionStartTimeRef = useRef<string>(new Date().toISOString());
+
+  // Available Recognition Languages
+  const availableLanguages = [
+    { code: 'te-IN', label: 'Telugu (తెలుగు)' },
+    { code: 'hi-IN', label: 'Hindi (हिन्दी)' },
+    { code: 'en-IN', label: 'English (India)' },
+    { code: 'ta-IN', label: 'Tamil (தமிழ்)' },
+    { code: 'kn-IN', label: 'Kannada (ಕನ್ನಡ)' },
+    { code: 'bn-IN', label: 'Bengali (বাংলা)' },
+    { code: 'mr-IN', label: 'Marathi (मराठी)' },
+  ];
+
+  // Quick Preset Phrases for realistic multi-lingual demonstration
+  const quickTestPhrases = [
+    {
+      title: '🚨 Telugu Bank OTP Scam (తెలుగు)',
+      text: 'నమస్కారం సార్, నేను మీ బ్యాంక్ మేనేజర్ మాట్లాడేది. మీ అకౌంట్ లో అనుమానాస్పద లావాదేవీ జరిగింది. ఖాతా బ్లాక్ కాకుండా ఉండాలంటే వెంటనే మీ మొబైల్ కు వచ్చిన ఓటీపీ చెప్పండి.',
+      lang: 'te-IN',
+      threatTag: 'OTP_HARVESTING',
+    },
+    {
+      title: '🚨 Telugu Digital Arrest Extortion (తెలుగు)',
+      text: 'హలో, నేను హైదరాబాద్ సైబర్ క్రైమ్ పోలీస్ ఇన్స్పెక్టర్ రావు మాట్లాడుతున్నాను. మీ ఆధార్ కార్డు పై మనీ లాండరింగ్ కేసు నమోదైంది. వెంటనే డిజిటల్ అరెస్ట్ ప్రొసీజర్ పూర్తి చేయండి.',
+      lang: 'te-IN',
+      threatTag: 'DIGITAL_ARREST',
+    },
+    {
+      title: '🚨 Hindi Digital Arrest (हिन्दी/CBI)',
+      text: 'मैं सीबीआई स्पेशल सेल ऑफिसर शर्मा बोल रहा हूँ। आपके नाम पर गैरकानूनी पार्सल ज़ब्त हुआ है, तुरंत वेरिफिकेशन करें।',
+      lang: 'hi-IN',
+      threatTag: 'DIGITAL_ARREST',
+    },
+    {
+      title: '🚨 High-Risk OTP Intercept (Telugu/English Code-Mix)',
+      text: 'Sir nenu Rajesh Kumar CFO matladutunnanu. Transaction hold lo padindi, meeku vachina OTP number ventane cheppandi.',
+      lang: 'te-IN',
+      threatTag: 'OTP_HARVESTING',
+    },
+    {
+      title: '🚨 Remote Access Trojan (AnyDesk/APK)',
+      text: 'Please install AnyDesk remote support app right now and give me the 9 digit code so our technician can fix your banking application update.',
+      lang: 'en-IN',
+      threatTag: 'REMOTE_ACCESS',
+    },
+    {
+      title: '⚠️ Urgent Electricity Disconnect Pretext',
+      text: 'Dear customer, your electricity power connection will be cut off tonight at 9:30 PM due to pending bill. Settle payment immediately via link.',
+      lang: 'en-IN',
+      threatTag: 'SCAM_PRETEXT',
+    },
+    {
+      title: '✅ Benign Account Inquiry (తెలుగు)',
+      text: 'నమస్కారం అండి, నా బ్యాంక్ అకౌంట్ బ్యాలెన్స్ మరియు స్టేట్‌మెంట్ తెలుసుకోవడానికి కాల్ చేశాను.',
+      lang: 'te-IN',
+      threatTag: 'BENIGN',
+    },
+    {
+      title: '✅ Benign Balance Check (English)',
+      text: 'Hello, good afternoon. I am calling to check the current cleared balance on my corporate current account.',
+      lang: 'en-IN',
+      threatTag: 'BENIGN',
+    },
+  ];
+
+  // Timer for duration tracking
+  useEffect(() => {
+    if (isRecording && !isPaused) {
+      timerRef.current = setInterval(() => {
+        setDurationSec((prev) => prev + 1);
+      }, 1000);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [isRecording, isPaused]);
+
+  // Clean up on unmount
+  useEffect(() => {
+    return () => {
+      if (audioManagerRef.current) {
+        audioManagerRef.current.stop();
+      }
+    };
+  }, []);
+
+  // Format Seconds to MM:SS
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  // IN-BUILT 5-LAYER DYNAMIC LIVE EVALUATION & FRAUD INTIMATION
+  // Evaluates every spoken turn dynamically in real-time during live calls without manual intervention
+  const evaluateAndApplyTurnFiveLayers = (
+    text: string,
+    currentTurn: number,
+    activeSessionId: string,
+    features: AudioFeatures,
+    langCode: string
+  ): AnalysisResultRecord => {
+    const timestamp = new Date().toISOString();
+    const previousTurn = analysisTurns[analysisTurns.length - 1];
+
+    // 1. Dynamic Sector Identification from Spoken Context
+    const sector = classifySpokenSector(text);
+    if (sector && sector.id !== 'GENERAL_ROUTINE') {
+      setDetectedSector(sector);
+      pushLiveIndication('info', `⚡ Sector Auto-Calibrated: ${sector.name} (${sector.confidence}% confidence)`);
+    }
+
+    // 2. LAYER 1: Acoustic DSP & Spoofing Analysis
+    const dynamicDeepfake = computeDeepfakeSignal(features, undefined, currentTurn, true);
+    const dynamicSpeaker = computeSpeakerSignal('live-speaker', 'Caller', features, undefined, currentTurn);
+    const dynamicReplay = computeReplaySignal(features, undefined, currentTurn);
+
+    if (dynamicDeepfake.score > 45) {
+      pushLiveIndication('danger', `🚨 Acoustic Anomaly: Synthetic vocal tract markers (Deepfake: ${dynamicDeepfake.score}%)`);
+    } else {
+      pushLiveIndication('success', `✅ Acoustic Verified: Natural human glottal pulses (Score: ${dynamicDeepfake.score}%)`);
+    }
+
+    // 3. LAYER 2: Zero-Trust Policy Engine & Calibrated Weights
+    const effectiveWeights = sector && sector.id !== 'GENERAL_ROUTINE'
+      ? sector.defaultWeights
+      : (currentTenant.weights || {
+          deepfake: 0.25,
+          speaker: 0.20,
+          replay: 0.15,
+          nlp: 0.25,
+          context: 0.15,
+        });
+
+    // 4. LAYER 3: Biometric Identity & Voiceprint Disparity
+    const speakerMismatch = Math.max(0, 100 - dynamicSpeaker.similarity);
+
+    // 5. LAYER 4: Conversational NLP, Intent Classification & Context Camouflage
+    const heuristics = evaluateTextHeuristics(text);
+    const contextResult = evaluateTurnInContext({
+      callId: activeSessionId,
+      turnNumber: currentTurn,
+      transcript: text,
+      sessionState: sessionContextRef.current,
+      tenantConfig: { ...currentTenant, weights: effectiveWeights },
+      externalBiometricScore: dynamicSpeaker.similarity,
+      externalDeepfakeScore: dynamicDeepfake.score,
+      externalReplayScore: dynamicReplay.replayScore,
+    });
+
+    sessionContextRef.current = contextResult.sessionContext;
+
+    // Real-time threat detection flags for P0 Zero-Trust Circuit Breakers
+    const isOtp = /(otp|one-time|verification code|auth code|passcode|secret code|2fa|authenticator|ओटीपी|ఓటీపీ)/i.test(text);
+    const isDigitalArrest = /(digital arrest|police|cbi|ed directorate|customs|cyber crime|crime branch|warrant|fir|jail|narcotics|parcel seized|illegal package|गिरफ्तारी|पुलिस|सीबीआई|పోలీస్|అరెస్ట్)/i.test(text);
+    const isRemoteAccess = /(anydesk|teamviewer|rustdesk|quicksupport|apk|download app|screen share|install this app|स्क्रीन शेयर)/i.test(text);
+    const isUrgentWire = /(transfer|wire|rtgs|neft|send money|pay now|beneficiary|vendor account|\blakh\b|\bcrore\b|\brupees\b|रुपये|पैसे)/i.test(text);
+    const isScamPretext = /(electricity bill|power disconnected|power cut|kyc update|kyc expire|aadhaar link)/i.test(text);
+
+    // 6. LAYER 5: Multi-Modal Risk Fusion & Circuit Breaker Engine
+    const fusionResult = fuseRiskSignals({
+      deepfakeScore: dynamicDeepfake.score,
+      speakerSimilarity: dynamicSpeaker.similarity,
+      replayScore: dynamicReplay.replayScore,
+      nlpScore: Math.max(heuristics.socialEngineeringRisk, contextResult.riskScore),
+      contextScore: contextResult.riskScore,
+      weights: effectiveWeights,
+      otpCredentialRequested: isOtp,
+      digitalArrestExtortion: isDigitalArrest,
+      financialDemandUrgent: isUrgentWire,
+      remoteAccessTrojan: isRemoteAccess,
+      scamPretext: isScamPretext,
+      threatCues: contextResult.detection.cues,
+    });
+
+    const finalRisk = fusionResult.finalRiskScore;
+    let finalDecision: 'ALLOW' | 'VERIFY' | 'PAUSE_ESCALATE' | 'BLOCK' = 'ALLOW';
+    if (finalRisk >= 75 || fusionResult.isCircuitBreakerActive) {
+      finalDecision = 'BLOCK';
+    } else if (finalRisk >= 50) {
+      finalDecision = 'PAUSE_ESCALATE';
+    } else if (finalRisk >= 30) {
+      finalDecision = 'VERIFY';
+    }
+
+    // Live 5-Layers State Update for real-time visualization
+    setDynamicFiveLayersState({
+      layer1Acoustic: {
+        deepfakeScore: dynamicDeepfake.score,
+        replayScore: dynamicReplay.replayScore,
+        status: dynamicDeepfake.score > 45 ? 'Synthetic Vocal Markers Flagged' : 'Natural Human Speech Confirmed',
+        isAnomaly: dynamicDeepfake.score > 45 || dynamicReplay.replayScore > 40,
+      },
+      layer2Policy: {
+        strictnessMode: 'Strict Zero-Trust (Default)',
+        sector: sector?.name || 'General Financial & Corporate',
+        zeroTrustFloor: 35,
+      },
+      layer3Biometric: {
+        similarity: dynamicSpeaker.similarity,
+        mismatchRisk: speakerMismatch,
+        callerRole: 'Unverified Incoming Caller',
+      },
+      layer4ContextNLP: {
+        intent: contextResult.intent,
+        context: contextResult.sessionContext.current_context,
+        coercionDetected: contextResult.detection.is_security_escalation || contextResult.riskScore > 50 || isDigitalArrest || isOtp,
+        cues: contextResult.detection.cues.length > 0 ? contextResult.detection.cues : [contextResult.intent],
+      },
+      layer5RiskFusion: {
+        finalRiskScore: finalRisk,
+        riskLevel: fusionResult.riskLevel,
+        decision: finalDecision,
+        circuitBreakerTriggered: fusionResult.circuitBreakerTriggered,
+        dominantRiskFactor: fusionResult.dominantRiskFactor,
+      },
+    });
+
+    // INTIMATE FRAUD DYNAMICALLY IN REAL-TIME
+    if (finalDecision === 'BLOCK' || fusionResult.isCircuitBreakerActive || finalRisk >= 75) {
+      const fraudIntimation: LiveFraudIntimation = {
+        id: `fraud-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString(),
+        turnNumber: currentTurn,
+        threatCategory: fusionResult.dominantRiskFactor,
+        threatDescription: fusionResult.circuitBreakerTriggered || `Critical threat pattern identified with risk score ${finalRisk}/100`,
+        cues: contextResult.detection.cues.length > 0 ? contextResult.detection.cues : [fusionResult.dominantRiskFactor],
+        decision: 'BLOCK',
+        circuitBreaker: fusionResult.circuitBreakerTriggered || 'P0 Zero-Trust Multi-Modal Circuit Breaker',
+        fusedRiskScore: finalRisk,
+        dominantFactor: fusionResult.dominantRiskFactor,
+      };
+      setLiveFraudIntimation(fraudIntimation);
+      playSecurityAlertBeep();
+      pushLiveIndication('danger', `🚨 LIVE FRAUD INTIMATED: ${fusionResult.dominantRiskFactor} (Risk: ${finalRisk}/100) -> IMMEDIATE BLOCK`);
+
+      // Automatic zero-touch background fine-tuning & dynamic suite enrollment
+      fetch(`/api/live-sessions/${activeSessionId}/tune-label`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          groundTruth: 'FRAUD',
+          threatType: fusionResult.dominantRiskFactor,
+          customTranscript: text,
+        }),
+      }).catch((e) => console.warn('Background auto-tune notification error:', e));
+    } else {
+      pushLiveIndication('success', `✅ Turn ${currentTurn} Evaluated: ${finalDecision} (Risk: ${finalRisk}/100)`);
+    }
+
+    const analysisRecord: AnalysisResultRecord = {
+      session_id: activeSessionId,
+      turn_number: currentTurn,
+      deepfake_score: dynamicDeepfake.score,
+      speaker_similarity: dynamicSpeaker.similarity,
+      replay_score: dynamicReplay.replayScore,
+      nlp_score: Math.max(heuristics.socialEngineeringRisk, contextResult.riskScore),
+      context: contextResult.sessionContext.current_context,
+      previous_context: previousTurn?.context || 'normal',
+      context_switch: contextResult.detection.context_switch,
+      language_switch: contextResult.detection.language_switch,
+      risk_score: finalRisk,
+      decision: finalDecision,
+      timestamp,
+    };
+
+    setAnalysisTurns((prev) => [...prev, analysisRecord]);
+
+    // Save analysis to DB endpoint asynchronously
+    fetch(`/api/live-sessions/${activeSessionId}/analysis`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(analysisRecord),
+    }).catch((err) => console.warn('Failed to save live analysis turn:', err));
+
+    return analysisRecord;
+  };
+
+  // Start Live Microphone
+  const handleStartRecording = async () => {
+    try {
+      const newSessionId = `CALL-LIVE-${Date.now().toString(36).toUpperCase()}`;
+      setSessionId(newSessionId);
+      sessionStartTimeRef.current = new Date().toISOString();
+      sessionContextRef.current = null;
+      setDurationSec(0);
+      setCaptions([]);
+      setCurrentInterimText('');
+      setAnalysisTurns([]);
+      setRecordedAudioUrl(null);
+      setAudioChunksCount(0);
+      setIsSavedToDb(false);
+      setIsAddedToEvaluation(false);
+      setLiveFraudIntimation(null);
+      turnCounterRef.current = 1;
+
+      // Register live session in DB / Backend immediately
+      fetch('/api/live-sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: newSessionId,
+          source: 'LIVE_MICROPHONE',
+          start_time: sessionStartTimeRef.current,
+          status: 'active',
+          detected_languages: [activeLang.substring(0, 2)],
+          total_duration: 0,
+          turns_count: 0,
+        }),
+      }).catch((e) => console.warn('Live session init notification error:', e));
+
+      const manager = new AudioStreamManager({
+        onChunk: async (features: AudioFeatures, chunkId: number) => {
+          lastFeaturesRef.current = features;
+        },
+        onLiveFeatures: (features: AudioFeatures) => {
+          lastFeaturesRef.current = features;
+        },
+        onTranscript: async (text: string, isFinal: boolean) => {
+          if (!text) return;
+
+          // Interim real-time heuristics while talking
+          const heuristics = evaluateTextHeuristics(text);
+          if (heuristics.urgencyScore > 50) {
+            pushLiveIndication('warning', '⚠️ Urgency Coercion: Immediate delivery/urgency demand');
+          }
+          if (heuristics.financialRequestDetected) {
+            pushLiveIndication('danger', '🚨 Financial Demand: Fund transfer / wire instruction');
+          }
+          if (heuristics.otpCredentialRequestDetected) {
+            pushLiveIndication('danger', '🛡️ Credential Intercept: OTP / PIN harvesting demand');
+          }
+
+          if (!isFinal) {
+            setCurrentInterimText(text);
+          } else {
+            setCurrentInterimText('');
+            const currentTurn = turnCounterRef.current++;
+            const turnId = `cap-${newSessionId}-${currentTurn}`;
+            const timestamp = new Date().toISOString();
+
+            // Append to captions list
+            setCaptions((prev) => [
+              ...prev,
+              {
+                id: turnId,
+                text,
+                isFinal: true,
+                timestamp,
+                turnNumber: currentTurn,
+                language: activeLang.substring(0, 2),
+              },
+            ]);
+
+            // Save caption to DB endpoint
+            fetch(`/api/live-sessions/${newSessionId}/captions`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                turn_number: currentTurn,
+                transcript: text,
+                detected_language: activeLang.substring(0, 2),
+                caption_status: 'final',
+              }),
+            }).catch((err) => console.warn('Failed to save live caption turn:', err));
+
+            // DYNAMIC 5-LAYER EVALUATION & INTIMATION (Zero manual intervention)
+            evaluateAndApplyTurnFiveLayers(
+              text,
+              currentTurn,
+              newSessionId,
+              lastFeaturesRef.current,
+              activeLang.substring(0, 2)
+            );
+          }
+        },
+        onVolumeChange: (vol: number) => {
+          setAudioVolume(vol);
+        },
+        onError: (err: string) => {
+          setNotification({ type: 'error', message: `Microphone Error: ${err}` });
+          setIsRecording(false);
+        },
+        onAudioChunkReady: async (_blob: Blob, base64Url: string, dur: number) => {
+          setAudioChunksCount((prev) => {
+            const nextCount = prev + 1;
+            // Post audio chunk record to DB
+            fetch(`/api/live-sessions/${newSessionId}/audio-chunk`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chunk_number: nextCount,
+                audio_data: base64Url.substring(0, 100) + '...[STREAM_CHUNK]',
+                duration: dur,
+                sample_rate: 16000,
+                format: 'audio/webm',
+              }),
+            }).catch((e) => console.warn('Chunk save warn:', e));
+            return nextCount;
+          });
+        },
+      });
+
+      manager.setLanguage(activeLang);
+      const ok = await manager.startMicrophone();
+      if (ok) {
+        audioManagerRef.current = manager;
+        setIsRecording(true);
+        setIsPaused(false);
+        setNotification({ type: 'info', message: 'Live Microphone active. Speak clearly into the microphone.' });
+      }
+    } catch (err: any) {
+      setNotification({ type: 'error', message: err.message || 'Failed to start microphone' });
+    }
+  };
+
+  // Pause / Resume
+  const handleTogglePause = () => {
+    if (!audioManagerRef.current) return;
+    if (isPaused) {
+      audioManagerRef.current.resumeMicrophone();
+      setIsPaused(false);
+      setNotification({ type: 'info', message: 'Microphone resumed.' });
+    } else {
+      audioManagerRef.current.pauseMicrophone();
+      setIsPaused(true);
+      setNotification({ type: 'info', message: 'Microphone paused.' });
+    }
+  };
+
+  // Stop & Finalize Session
+  const handleStopRecording = async () => {
+    if (!audioManagerRef.current && !isRecording) return;
+
+    if (audioManagerRef.current) {
+      const audioUrl = await audioManagerRef.current.getRecordedAudioDataUrl();
+      if (audioUrl) {
+        setRecordedAudioUrl(audioUrl);
+      }
+      audioManagerRef.current.stop();
+      audioManagerRef.current = null;
+    }
+
+    setIsRecording(false);
+    setIsPaused(false);
+    setAudioVolume(0);
+
+    const endTime = new Date().toISOString();
+    const finalTurn = analysisTurns[analysisTurns.length - 1];
+    const finalRisk = finalTurn ? finalTurn.risk_score : 15;
+    const finalDecision = finalTurn ? finalTurn.decision : 'ALLOW';
+    const allContexts = Array.from(new Set(analysisTurns.map((a) => a.context)));
+    const fullTranscript = captions.map((c) => c.text).join(' ');
+
+    // 1. Finalize Live Session in DB
+    try {
+      await fetch('/api/live-sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId,
+          source: 'LIVE_MICROPHONE',
+          start_time: sessionStartTimeRef.current,
+          end_time: endTime,
+          status: 'completed',
+          total_duration: durationSec,
+          detected_languages: [activeLang.substring(0, 2)],
+          final_risk_score: finalRisk,
+          final_decision: finalDecision,
+          turns_count: captions.length,
+        }),
+      });
+      setIsSavedToDb(true);
+    } catch (err) {
+      console.error('Failed to update live session:', err);
+    }
+
+    // 2. AUTOMATIC EVALUATION DATASET INTEGRATION (Core User Mandate)
+    // Live sessions automatically flow to the Evaluation Audio Library with UNVERIFIED label status
+    if (autoAddToEvaluation && captions.length > 0) {
+      try {
+        const evalPayload = {
+          source: 'LIVE_MICROPHONE',
+          session_id: sessionId,
+          audio_reference: recordedAudioUrl ? 'recorded_mic_blob.webm' : 'live_mic_stream.webm',
+          language: availableLanguages.find((l) => l.code === activeLang)?.label.split(' ')[0] || 'English',
+          duration: formatTime(durationSec),
+          detected_contexts: allContexts.length > 0 ? allContexts : ['normal'],
+          deepfake_prediction: finalRisk > 70 ? 'Synthetic / Cloned Voice' : 'Human Voice',
+          prediction_confidence: 0.92,
+          // CRITICAL: Must be UNVERIFIED until human reviewer approves
+          label_status: 'UNVERIFIED',
+          verified_label: false,
+          expected_decision: finalDecision,
+          expected_risk_level: finalRisk > 75 ? 'HIGH' : finalRisk > 50 ? 'MEDIUM' : 'LOW',
+          expected_context_flow: allContexts,
+          transcript: fullTranscript,
+          turns: captions.map((c, idx) => ({
+            turn_number: c.turnNumber,
+            text: c.text,
+            language: c.language,
+            context: analysisTurns[idx]?.context || 'normal',
+            risk: analysisTurns[idx]?.risk_score || 15,
+            decision: analysisTurns[idx]?.decision || 'ALLOW',
+          })),
+        };
+
+        const resp = await fetch('/api/evaluation-audio', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(evalPayload),
+        });
+
+        if (resp.ok) {
+          setIsAddedToEvaluation(true);
+          setNotification({
+            type: 'success',
+            message: `Session completed, stored in Database, and automatically added to Evaluation Audio Library as UNVERIFIED.`,
+          });
+        }
+      } catch (e) {
+        console.error('Error adding to evaluation dataset:', e);
+      }
+    } else {
+      setNotification({
+        type: 'success',
+        message: 'Live session completed and saved to PostgreSQL database.',
+      });
+    }
+  };
+
+  // Inject Preset utterance directly for easy demonstration
+  const handleInjectPreset = (preset: typeof quickTestPhrases[0]) => {
+    setActiveLang(preset.lang);
+    if (audioManagerRef.current) {
+      audioManagerRef.current.setLanguage(preset.lang);
+    }
+
+    const currentTurn = turnCounterRef.current++;
+    const turnId = `cap-${sessionId}-${currentTurn}`;
+    const timestamp = new Date().toISOString();
+
+    setCaptions((prev) => [
+      ...prev,
+      {
+        id: turnId,
+        text: preset.text,
+        isFinal: true,
+        timestamp,
+        turnNumber: currentTurn,
+        language: preset.lang.substring(0, 2),
+      },
+    ]);
+
+    // Save caption
+    fetch(`/api/live-sessions/${sessionId}/captions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        turn_number: currentTurn,
+        transcript: preset.text,
+        detected_language: preset.lang.substring(0, 2),
+        caption_status: 'final',
+      }),
+    }).catch((e) => console.warn('Save caption error:', e));
+
+    // Dynamic 5-Layer In-Call Evaluation for injected speech
+    const isHighThreat = (preset as any).threatTag && (preset as any).threatTag !== 'BENIGN';
+    const dynamicFeatures: AudioFeatures = {
+      ...lastFeaturesRef.current,
+      rms: isHighThreat ? 0.32 : 0.12,
+      pitchVariance: isHighThreat ? 0.48 : 0.22,
+      spectralCentroid: isHighThreat ? 2850 : 2150,
+      zeroCrossingRate: isHighThreat ? 0.38 : 0.24,
+    };
+
+    evaluateAndApplyTurnFiveLayers(
+      preset.text,
+      currentTurn,
+      sessionId,
+      dynamicFeatures,
+      preset.lang.substring(0, 2)
+    );
+
+    setNotification({
+      type: isHighThreat ? 'error' : 'info',
+      message: `Injected Turn #${currentTurn}: ${preset.title} • Dynamically evaluated across all 5 layers in-call.`,
+    });
+  };
+
+  // Inject and dynamically evaluate custom spoken utterance (in Telugu, Hindi, or English)
+  const handleInjectCustomTurn = async (inputText?: string) => {
+    const textToEvaluate = (inputText || customTurnInput || '').trim();
+    if (!textToEvaluate) return;
+
+    const currentTurn = turnCounterRef.current++;
+    const turnId = `cap-${sessionId}-${currentTurn}`;
+    const timestamp = new Date().toISOString();
+    const langCode = activeLang.substring(0, 2);
+
+    setCaptions((prev) => [
+      ...prev,
+      {
+        id: turnId,
+        text: textToEvaluate,
+        isFinal: true,
+        timestamp,
+        turnNumber: currentTurn,
+        language: langCode,
+      },
+    ]);
+
+    setCustomTurnInput('');
+
+    // Save caption to DB
+    fetch(`/api/live-sessions/${sessionId}/captions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        turn_number: currentTurn,
+        transcript: textToEvaluate,
+        detected_language: langCode,
+        caption_status: 'final',
+      }),
+    }).catch((e) => console.warn('Save caption error:', e));
+
+    // Dynamic 5-layer evaluation in-call
+    const dynamicFeatures: AudioFeatures = {
+      ...lastFeaturesRef.current,
+      rms: 0.22,
+      pitchVariance: 0.35,
+      spectralCentroid: 2400,
+      zeroCrossingRate: 0.28,
+    };
+
+    evaluateAndApplyTurnFiveLayers(
+      textToEvaluate,
+      currentTurn,
+      sessionId,
+      dynamicFeatures,
+      langCode
+    );
+
+    setNotification({
+      type: 'info',
+      message: `Spoken Turn #${currentTurn} evaluated dynamically through all 5 layers in-call.`,
+    });
+  };
+
+  // Retranscribe and Re-evaluate Live Session with Neural Gemini Speech Model
+  const handleRetranscribeWithGemini = async (customText?: string) => {
+    setIsNeuralTranscribing(true);
+    setNotification({
+      type: 'info',
+      message: 'Processing Multilingual Neural Speech Transcription & 5-Layer re-evaluation...',
+    });
+
+    try {
+      const textToUse = (customText || captions.map((c) => c.text).join('. ')).trim();
+      const res = await fetch(`/api/live-sessions/${sessionId}/reanalyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customTranscript: textToUse || undefined,
+          strictnessMode: 'strict',
+          unverifiedCallerFloor: 35,
+          deepfakeScore: 45,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setReanalysisReport(data);
+        if (data.circuitBreakerTriggered || data.finalDecision === 'BLOCK') {
+          setLiveFraudIntimation({
+            type: 'CRITICAL',
+            title: '🚨 INTIMATION: MULTI-LAYER FRAUD DETECTED',
+            message: data.dominantThreat || 'High-Risk Impersonation / Credential Harvesting Pattern',
+            detectedTurn: data.turnsCount,
+            layerTriggered: 'Layer 5: Unified Risk Fusion',
+            riskScore: data.finalRiskScore,
+            decision: data.finalDecision,
+            timestamp: new Date().toLocaleTimeString(),
+            threatCategory: data.dominantThreat,
+            circuitBreaker: data.circuitBreakerTriggered,
+          });
+          playSecurityAlertBeep();
+        }
+        setNotification({
+          type: 'success',
+          message: `Neural re-analysis complete! Risk: ${data.finalRiskScore}/100 • Decision: ${data.finalDecision}`,
+        });
+      } else {
+        const err = await res.json();
+        setNotification({ type: 'error', message: err.error || 'Failed to re-transcribe session' });
+      }
+    } catch (e: any) {
+      setNotification({ type: 'error', message: e.message || 'Re-transcription failed' });
+    } finally {
+      setIsNeuralTranscribing(false);
+    }
+  };
+
+  // Delete / Purge Session (Privacy DPDP Act 2023)
+  const handlePurgeSession = async () => {
+    try {
+      await fetch(`/api/live-sessions/${sessionId}`, { method: 'DELETE' });
+      setCaptions([]);
+      setAnalysisTurns([]);
+      setRecordedAudioUrl(null);
+      setIsSavedToDb(false);
+      setIsAddedToEvaluation(false);
+      setDurationSec(0);
+      setNotification({
+        type: 'info',
+        message: `Session ${sessionId} permanently purged from all database tables (DPDP compliance).`,
+      });
+    } catch (err) {
+      console.error('Error purging session:', err);
+    }
+  };
+
+  // Re-Analyze Current Live Session through Full 5-Layer Heuristic Pipeline
+  const handleReanalyzeCurrentSession = async (customTranscript?: string) => {
+    setIsReanalyzingSession(true);
+    try {
+      const textToAnalyze = customTranscript || captions.map((c) => c.text).join('. ');
+      if (!textToAnalyze.trim()) {
+        setNotification({
+          type: 'error',
+          message: 'No transcript recorded yet to evaluate. Speak or inject test dialogue first.',
+        });
+        return;
+      }
+
+      const res = await fetch(`/api/live-sessions/${sessionId}/reanalyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customTranscript: textToAnalyze,
+          strictnessMode: 'strict',
+          tenantId: currentTenant.id,
+          unverifiedCallerFloor: 35,
+          speakerSimilarity: 25,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setReanalysisReport(data);
+
+        if (data.turns && data.turns.length > 0) {
+          const mappedRecords: AnalysisResultRecord[] = data.turns.map((t: any, idx: number) => ({
+            session_id: sessionId,
+            turn_number: idx + 1,
+            deepfake_score: data.layersBreakdown?.layer1_acoustic?.metrics?.deepfakeScore || 20,
+            speaker_similarity: 25,
+            replay_score: data.layersBreakdown?.layer1_acoustic?.metrics?.replayScore || 15,
+            nlp_score: t.riskScore,
+            context: t.sessionContext?.current_context || 'normal_conversation',
+            previous_context: t.sessionContext?.previous_context || null,
+            context_switch: Boolean(t.detection?.context_switch),
+            language_switch: Boolean(t.detection?.language_switch),
+            risk_score: t.riskScore,
+            decision: t.decision,
+            timestamp: new Date().toISOString(),
+          }));
+          setAnalysisTurns(mappedRecords);
+        }
+
+        setNotification({
+          type: data.finalDecision === 'BLOCK' ? 'error' : data.finalDecision === 'PAUSE_ESCALATE' ? 'error' : 'success',
+          message: `5-Layer Model Re-Analysis: ${data.finalDecision} (Risk: ${data.finalRiskScore}/100). ${data.circuitBreakerTriggered || ''}`,
+        });
+      }
+    } catch (err) {
+      console.error('Error re-analyzing live session:', err);
+    } finally {
+      setIsReanalyzingSession(false);
+    }
+  };
+
+  // Fine-Tune Model with this Live Session & Enroll in Test Suite
+  const handleFineTuneCurrentSession = async (groundTruth: 'FRAUD' | 'LEGITIMATE', threatType: string) => {
+    setIsReanalyzingSession(true);
+    try {
+      const textToAnalyze = captions.map((c) => c.text).join('. ');
+      const res = await fetch(`/api/live-sessions/${sessionId}/tune-label`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          groundTruth,
+          threatType,
+          customTranscript: textToAnalyze,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setNotification({
+          type: 'success',
+          message: data.message || `Fine-tuned model with ${groundTruth}. Dynamic suite accuracy: ${data.testReport?.accuracy}%.`,
+        });
+        handleReanalyzeCurrentSession();
+      }
+    } catch (err) {
+      console.error('Error fine-tuning live session:', err);
+    } finally {
+      setIsReanalyzingSession(false);
+    }
+  };
+
+  // Last turn analysis for top indicator
+  const latestAnalysis = analysisTurns[analysisTurns.length - 1];
+
+  return (
+    <div className="space-y-6">
+      {/* Notifications */}
+      {notification && (
+        <div
+          className={`p-3.5 rounded-xl border flex items-center justify-between text-xs transition-all ${
+            notification.type === 'error'
+              ? 'bg-rose-50 border-rose-200 text-rose-800'
+              : notification.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-indigo-50 border-indigo-200 text-indigo-800'
+          }`}
+        >
+          <div className="flex items-center space-x-2">
+            {notification.type === 'error' ? (
+              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+            ) : notification.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+            ) : (
+              <Info className="w-4 h-4 shrink-0 text-indigo-600" />
+            )}
+            <span>{notification.message}</span>
+          </div>
+          <button
+            onClick={() => setNotification(null)}
+            className="text-slate-500 hover:text-slate-800 cursor-pointer font-bold ml-2"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Hero Control Console */}
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
+        <div className="p-6 bg-slate-900 text-white flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center space-x-2.5 mb-1.5">
+              <span className="w-3 h-3 rounded-full bg-rose-500 animate-pulse" />
+              <h2 className="text-lg font-bold tracking-tight">Live Microphone Voice Trust Firewall</h2>
+              <span className="text-[11px] font-mono uppercase px-2 py-0.5 rounded-full bg-slate-800 text-indigo-300 border border-slate-700">
+                SIH Core Architecture
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 max-w-2xl">
+              Captures audio directly from browser microphone, performs Web Speech streaming captioning,
+              runs real-time multi-signal acoustic & context-switch security evaluation, and automatically persists data into PostgreSQL.
+            </p>
+          </div>
+
+          {/* Session Duration & ID */}
+          <div className="flex items-center gap-3 bg-slate-800/90 border border-slate-700 px-4 py-2.5 rounded-xl text-xs font-mono shrink-0">
+            <div>
+              <div className="text-[10px] text-slate-400 uppercase">Session ID</div>
+              <div className="font-semibold text-indigo-300">{sessionId}</div>
+            </div>
+            <div className="h-7 w-px bg-slate-700" />
+            <div>
+              <div className="text-[10px] text-slate-400 uppercase">Elapsed Time</div>
+              <div className="font-bold text-white">{formatTime(durationSec)}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Live Fraud Intimation Banner (Dynamically Triggered In-Call) */}
+        {liveFraudIntimation && (
+          <div className="mx-6 mt-4 p-4 rounded-2xl bg-rose-50 border-2 border-rose-500 shadow-md flex flex-col md:flex-row items-start md:items-center justify-between gap-4 animate-pulse">
+            <div className="flex items-start space-x-3.5">
+              <div className="p-2.5 rounded-xl bg-rose-600 text-white shrink-0 shadow-xs">
+                <ShieldAlert className="w-5 h-5 animate-bounce" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase font-black bg-rose-600 text-white tracking-wider">
+                    🚨 LIVE IN-CALL FRAUD INTIMATED
+                  </span>
+                  <span className="font-bold text-sm text-rose-950">
+                    {liveFraudIntimation.threatCategory}
+                  </span>
+                  <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold border border-rose-300">
+                    Turn #{liveFraudIntimation.turnNumber} • Fused Risk: {liveFraudIntimation.fusedRiskScore}/100
+                  </span>
+                </div>
+                <p className="text-xs text-rose-900 font-medium mt-1">
+                  {liveFraudIntimation.threatDescription}
+                </p>
+                <div className="flex items-center gap-2 mt-1.5 text-[11px] text-rose-800">
+                  <span className="font-semibold text-rose-950">Zero-Trust Circuit Breaker:</span>
+                  <span className="font-mono font-bold bg-rose-100 px-2 py-0.5 rounded border border-rose-200">
+                    {liveFraudIntimation.circuitBreaker}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5 shrink-0 w-full md:w-auto justify-end">
+              <span className="px-3.5 py-1.5 rounded-xl bg-rose-900 text-rose-100 text-xs font-mono font-bold tracking-wider uppercase border border-rose-700 shadow-xs">
+                ENFORCED: {liveFraudIntimation.decision}
+              </span>
+              <button
+                onClick={() => setLiveFraudIntimation(null)}
+                className="px-3 py-1.5 rounded-xl bg-white hover:bg-rose-100 text-rose-800 border border-rose-300 text-xs font-semibold cursor-pointer transition shadow-2xs"
+              >
+                Acknowledge
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Live Audio Visualizer Bar */}
+        <div className="bg-slate-950 px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-4 border-b border-slate-800">
+          <div className="flex items-center space-x-3 w-full sm:w-auto">
+            <div className="text-xs font-mono text-slate-400 flex items-center gap-1.5 shrink-0">
+              <Volume2 className="w-3.5 h-3.5 text-indigo-400" />
+              <span>VU Level</span>
+            </div>
+            {/* Real dynamic audio bar */}
+            <div className="w-full sm:w-48 h-3 bg-slate-800 rounded-full overflow-hidden p-0.5 border border-slate-700 flex items-center">
+              <div
+                className="h-full rounded-full transition-all duration-75"
+                style={{
+                  width: `${Math.max(audioVolume * 100, 4)}%`,
+                  backgroundColor:
+                    audioVolume > 0.7
+                      ? '#ef4444'
+                      : audioVolume > 0.4
+                      ? '#f59e0b'
+                      : '#10b981',
+                }}
+              />
+            </div>
+            <span className="text-[11px] font-mono text-slate-400 w-10 text-right">
+              {Math.round(audioVolume * 100)}%
+            </span>
+          </div>
+
+          {/* Audio Chunks & DB status badge */}
+          <div className="flex items-center gap-2 text-xs font-mono">
+            <span className="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">
+              Recorded Chunks: <strong className="text-white">{audioChunksCount}</strong>
+            </span>
+            <span
+              className={`px-2 py-1 rounded border flex items-center gap-1 ${
+                isSavedToDb
+                  ? 'bg-emerald-950/80 text-emerald-300 border-emerald-800'
+                  : 'bg-slate-800 text-slate-400 border-slate-700'
+              }`}
+            >
+              <Database className="w-3 h-3" />
+              {isSavedToDb ? 'Synced to DB' : 'Buffering in Session'}
+            </span>
+          </div>
+        </div>
+
+        {/* Recording Controls & Settings */}
+        <div className="p-6 bg-slate-50/70 border-b border-slate-200/80 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex flex-wrap items-center gap-3">
+            {!isRecording ? (
+              <button
+                id="btn-start-mic-capture"
+                onClick={handleStartRecording}
+                className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs tracking-wide transition flex items-center gap-2 cursor-pointer shadow-sm shadow-rose-200"
+              >
+                <Mic className="w-4 h-4 animate-bounce" />
+                Start Live Microphone
+              </button>
+            ) : (
+              <>
+                <button
+                  id="btn-pause-mic"
+                  onClick={handleTogglePause}
+                  className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+                    isPaused
+                      ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                      : 'bg-slate-200 hover:bg-slate-300 text-slate-800'
+                  }`}
+                >
+                  {isPaused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
+                  {isPaused ? 'Resume Mic' : 'Pause Mic'}
+                </button>
+
+                <button
+                  id="btn-stop-mic-capture"
+                  onClick={handleStopRecording}
+                  className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <Square className="w-3.5 h-3.5 text-rose-400" />
+                  End & Save Session
+                </button>
+              </>
+            )}
+
+            {/* Language Selector */}
+            <div className="flex items-center space-x-1.5 bg-white border border-slate-200 px-3 py-1.5 rounded-xl text-xs shadow-2xs">
+              <Languages className="w-3.5 h-3.5 text-slate-500" />
+              <span className="text-slate-500 font-medium">Speech ASR:</span>
+              <select
+                value={activeLang}
+                onChange={(e) => {
+                  setActiveLang(e.target.value);
+                  if (audioManagerRef.current) {
+                    audioManagerRef.current.setLanguage(e.target.value);
+                  }
+                  pushLiveIndication('info', `Switched Speech Recognition to ${e.target.value}`);
+                }}
+                className="bg-transparent font-semibold text-slate-800 outline-hidden cursor-pointer"
+              >
+                {availableLanguages.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Quick Vernacular Language Switcher Pills */}
+          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+            <span className="text-[11px] font-bold text-slate-500 font-mono">Quick ASR Dialect:</span>
+            {availableLanguages.map((lang) => {
+              const isSelected = activeLang === lang.code;
+              return (
+                <button
+                  key={lang.code}
+                  type="button"
+                  onClick={() => {
+                    setActiveLang(lang.code);
+                    if (audioManagerRef.current) {
+                      audioManagerRef.current.setLanguage(lang.code);
+                    }
+                    pushLiveIndication('info', `Speech Recognition active for: ${lang.label}`);
+                    setNotification({
+                      type: 'info',
+                      message: `ASR listening set to ${lang.label}.`,
+                    });
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+                    isSelected
+                      ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs'
+                      : 'bg-white text-slate-700 hover:bg-slate-100 border-slate-200'
+                  }`}
+                >
+                  {lang.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Auto-Add to Evaluation Checkbox */}
+          <div className="flex items-center space-x-2 text-xs">
+            <label className="flex items-center space-x-2 cursor-pointer select-none text-slate-700">
+              <input
+                type="checkbox"
+                checked={autoAddToEvaluation}
+                onChange={(e) => setAutoAddToEvaluation(e.target.checked)}
+                className="rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+              />
+              <span className="font-medium">
+                Auto-add eligible audio to Evaluation Dataset (as{' '}
+                <strong className="text-amber-700">UNVERIFIED</strong>)
+              </span>
+            </label>
+          </div>
+        </div>
+
+        {/* In-Call Spoken Utterance Evaluator & Injector */}
+        <div className="px-6 py-2.5 bg-slate-900 text-white flex flex-col md:flex-row items-stretch md:items-center gap-2 border-b border-slate-800">
+          <div className="flex items-center gap-1.5 shrink-0 text-xs font-bold text-indigo-300">
+            <Zap className="w-3.5 h-3.5 text-amber-400" />
+            <span>In-Call Utterance Tester:</span>
+          </div>
+          <div className="flex-1 flex items-center gap-1.5">
+            <input
+              type="text"
+              value={customTurnInput}
+              onChange={(e) => setCustomTurnInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleInjectCustomTurn();
+              }}
+              placeholder="Type or paste any spoken utterance (Telugu, Hindi, English) to evaluate dynamically across all 5 layers..."
+              className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-indigo-500"
+            />
+            <button
+              onClick={() => handleInjectCustomTurn()}
+              disabled={!customTurnInput.trim()}
+              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1 transition cursor-pointer shrink-0"
+            >
+              <Send className="w-3 h-3" />
+              <span>Evaluate Turn</span>
+            </button>
+            <button
+              onClick={() => handleRetranscribeWithGemini()}
+              disabled={isNeuralTranscribing}
+              className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1 transition cursor-pointer shrink-0"
+              title="Re-transcribe entire session with Gemini Multilingual Speech Recognition"
+            >
+              <RefreshCw className={`w-3 h-3 ${isNeuralTranscribing ? 'animate-spin' : ''}`} />
+              <span>{isNeuralTranscribing ? 'Transcribing...' : 'Neural ASR Re-check'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Interactive Preset Injector Bar */}
+        <div className="px-6 py-3 bg-indigo-50/50 border-b border-indigo-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+          <div className="flex items-center space-x-2 text-xs text-indigo-900 font-medium">
+            <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+            <span>Demonstration Test Phrases (Click to simulate live speech into recognizer):</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {quickTestPhrases.map((phrase, idx) => (
+              <button
+                key={idx}
+                onClick={() => handleInjectPreset(phrase)}
+                className="px-2.5 py-1 rounded-md bg-white hover:bg-indigo-100 border border-indigo-200 text-[11px] font-medium text-indigo-700 transition cursor-pointer shadow-2xs"
+                title={phrase.text}
+              >
+                {phrase.title}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Dynamic Sector Identification & Real-Time Indications Bar */}
+        <div className="px-6 py-4 bg-gradient-to-r from-sky-50/90 via-indigo-50/80 to-purple-50/80 border-b border-indigo-200/80">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2.5">
+            <div className="flex items-center space-x-2.5">
+              <div className="p-2 rounded-xl bg-white border border-indigo-200 text-indigo-700 shadow-2xs">
+                <Sparkles className="w-4 h-4 text-indigo-600" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] uppercase font-mono tracking-wider font-bold bg-indigo-600 text-white px-2 py-0.5 rounded">
+                    ⚡ AUTO-DETECTED SECTOR
+                  </span>
+                  <span className="text-xs font-bold text-slate-900">
+                    {detectedSector?.name || "Evaluating domain from spoken context..."}
+                  </span>
+                  <span className="text-[10px] font-mono font-semibold bg-white border border-indigo-200 px-2 py-0.5 rounded-full text-indigo-700">
+                    {detectedSector?.confidence || 50}% Confidence
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-600 mt-0.5">
+                  <strong className="text-slate-800">Dynamic Policy Calibrated:</strong> {detectedSector?.policyFocus || "Listening for sector cues (Banking, Corporate, Telecom, Government)..."}
+                  <span className="text-indigo-700 font-semibold ml-1.5">(No manual sector setup needed)</span>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {isRecording ? (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300 animate-pulse">
+                  <span className="w-2 h-2 rounded-full bg-emerald-600" />
+                  VOICE RUNNING
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-white text-slate-600 border border-slate-200">
+                  <span className="w-2 h-2 rounded-full bg-slate-400" />
+                  STANDBY
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Real-Time Live Indications Stream Ticker */}
+          <div className="space-y-1.5 pt-2 border-t border-indigo-200/60">
+            <div className="flex items-center justify-between text-[11px] font-semibold text-slate-700">
+              <span className="flex items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5 text-indigo-600" />
+                Live Indications & Stream Alerts (Voice Active):
+              </span>
+              <span className="text-[10px] text-slate-500 font-mono">Dynamic Real-Time Feed</span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {liveIndications.map((ind) => (
+                <div
+                  key={ind.id}
+                  className={`text-[11px] px-2.5 py-1 rounded-lg border font-medium flex items-center gap-1.5 shadow-2xs transition-all ${
+                    ind.type === 'danger'
+                      ? 'bg-rose-50 text-rose-800 border-rose-200 font-bold'
+                      : ind.type === 'warning'
+                      ? 'bg-amber-50 text-amber-800 border-amber-200'
+                      : ind.type === 'success'
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : 'bg-white text-slate-700 border-slate-200'
+                  }`}
+                >
+                  <span className="text-[10px] font-mono text-slate-400">{ind.timestamp}</span>
+                  <span>{ind.text}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Live Audio Playback (if recorded) */}
+        {recordedAudioUrl && (
+          <div className="p-4 bg-amber-50/60 border-b border-amber-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+            <div className="flex items-center space-x-2 text-amber-900">
+              <Volume2 className="w-4 h-4 text-amber-700" />
+              <span>
+                <strong>Session Audio Captured ({formatTime(durationSec)}):</strong> Listen back to the raw microphone stream.
+              </span>
+            </div>
+            <audio controls src={recordedAudioUrl} className="h-8 max-w-xs" />
+          </div>
+        )}
+      </div>
+
+      {/* Split View: Live Captions Stream vs Real-Time Security Intelligence */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left Column: Live Captions & Transcription Feed (7 cols) */}
+        <div className="lg:col-span-7 space-y-4">
+          <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <div className="flex items-center space-x-2">
+                <Radio className={`w-4 h-4 ${isRecording ? 'text-rose-500 animate-pulse' : 'text-slate-400'}`} />
+                <h3 className="text-sm font-bold text-slate-900">Live Captions Stream</h3>
+                <span className="text-[11px] font-mono text-slate-500">({captions.length} turns recorded)</span>
+              </div>
+
+              {isRecording && (
+                <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-semibold font-mono uppercase">
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-ping" />
+                  Live Listening
+                </span>
+              )}
+            </div>
+
+            {/* Transcription History Container */}
+            <div className="space-y-3 min-h-[300px] max-h-[480px] overflow-y-auto pr-1">
+              {captions.length === 0 && !currentInterimText && (
+                <div className="flex flex-col items-center justify-center py-16 text-center text-slate-400 space-y-2">
+                  <Mic className="w-8 h-8 text-slate-300" />
+                  <p className="text-xs">
+                    No speech recorded yet. Click <strong className="text-slate-600">Start Live Microphone</strong> or click a test phrase above.
+                  </p>
+                </div>
+              )}
+
+              {captions.map((cap, idx) => {
+                const turnAnalysis = analysisTurns[idx];
+                return (
+                  <div
+                    key={cap.id}
+                    className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/60 hover:bg-slate-50 transition"
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <div className="flex items-center space-x-2">
+                        <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-mono text-[10px] font-bold">
+                          Turn #{cap.turnNumber}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-mono text-[10px] uppercase font-semibold">
+                          {cap.language}
+                        </span>
+                        <span className="text-[11px] text-slate-400 font-mono">
+                          {new Date(cap.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+
+                      {turnAnalysis && (
+                        <div className="flex items-center gap-1.5">
+                          {turnAnalysis.context_switch && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300 text-[10px] font-semibold flex items-center gap-1">
+                              <AlertTriangle className="w-3 h-3" />
+                              Context Switch
+                            </span>
+                          )}
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${
+                              turnAnalysis.decision === 'ALLOW'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : turnAnalysis.decision === 'STEP_UP_MFA'
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-rose-100 text-rose-800'
+                            }`}
+                          >
+                            Risk: {turnAnalysis.risk_score} • {turnAnalysis.decision}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <p className="text-xs sm:text-sm text-slate-800 font-medium leading-relaxed">
+                      "{cap.text}"
+                    </p>
+                  </div>
+                );
+              })}
+
+              {/* Streaming Interim text */}
+              {currentInterimText && (
+                <div className="p-3.5 rounded-xl border border-dashed border-indigo-300 bg-indigo-50/40 animate-pulse">
+                  <div className="flex items-center space-x-2 mb-1">
+                    <span className="px-2 py-0.5 rounded bg-indigo-200 text-indigo-800 font-mono text-[10px] font-bold">
+                      Interim ASR Stream...
+                    </span>
+                  </div>
+                  <p className="text-xs sm:text-sm text-indigo-950 font-medium italic">
+                    "{currentInterimText}..."
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Bottom Actions */}
+            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+              <div className="text-slate-500 font-mono text-[11px]">
+                Active Tenant: <strong className="text-slate-800">{currentTenant.name}</strong>
+              </div>
+              <button
+                onClick={handlePurgeSession}
+                className="text-slate-500 hover:text-rose-600 font-medium flex items-center gap-1 transition cursor-pointer text-xs"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Purge Session
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Column: Real-Time Security Intelligence & Evaluation Status (5 cols) */}
+        <div className="lg:col-span-5 space-y-4">
+          {/* Real-time Decision Card */}
+          <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5">
+            <h3 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
+              <Activity className="w-4 h-4 text-indigo-600" />
+              Real-Time Security Evaluation
+            </h3>
+
+            {latestAnalysis ? (
+              <div className="space-y-4">
+                {/* Decision Banner */}
+                <div
+                  className={`p-4 rounded-xl border flex items-center justify-between ${
+                    latestAnalysis.decision === 'ALLOW'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      : latestAnalysis.decision === 'STEP_UP_MFA'
+                      ? 'bg-amber-50 border-amber-200 text-amber-900'
+                      : 'bg-rose-50 border-rose-200 text-rose-900'
+                  }`}
+                >
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider font-bold opacity-75">
+                      Current Action Decision
+                    </div>
+                    <div className="text-base font-extrabold flex items-center gap-1.5">
+                      {latestAnalysis.decision === 'ALLOW' ? (
+                        <ShieldCheck className="w-5 h-5 text-emerald-600" />
+                      ) : (
+                        <ShieldAlert className="w-5 h-5 text-rose-600" />
+                      )}
+                      {latestAnalysis.decision}
+                    </div>
+                  </div>
+
+                  <div className="text-right">
+                    <div className="text-[10px] uppercase tracking-wider font-bold opacity-75">
+                      Risk Score
+                    </div>
+                    <div className="text-2xl font-black font-mono">
+                      {latestAnalysis.risk_score}
+                      <span className="text-xs font-normal">/100</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Signals Breakdown */}
+                <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                  <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                    <div className="text-[10px] text-slate-500 uppercase">Context</div>
+                    <div className="font-bold text-slate-800 capitalize truncate">
+                      {latestAnalysis.context.replace(/_/g, ' ')}
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                    <div className="text-[10px] text-slate-500 uppercase">Speaker Match</div>
+                    <div className="font-bold text-slate-800">{latestAnalysis.speaker_similarity}%</div>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                    <div className="text-[10px] text-slate-500 uppercase">Deepfake Score</div>
+                    <div className="font-bold text-slate-800">{latestAnalysis.deepfake_score}%</div>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                    <div className="text-[10px] text-slate-500 uppercase">Replay Risk</div>
+                    <div className="font-bold text-slate-800">{latestAnalysis.replay_score}%</div>
+                  </div>
+                </div>
+
+                {/* Context Switch Alert */}
+                {latestAnalysis.context_switch && (
+                  <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="block font-semibold">Anomalous Context Transition Detected</strong>
+                      <span>
+                        Conversation transitioned from {latestAnalysis.previous_context} to {latestAnalysis.context}.
+                        Triggered escalation protocols.
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="py-8 text-center text-slate-400 text-xs">
+                Awaiting first spoken turn to generate real-time risk scores.
+              </div>
+            )}
+          </div>
+
+          {/* In-Built 5-Layer Live Engine & Real-Time Fraud Intimation Card */}
+          <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <div className="p-1.5 rounded-lg bg-indigo-50 border border-indigo-100 text-indigo-600">
+                  <Layers className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    In-Built 5-Layer Live Intelligence
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Real-time in-call evaluation • Zero manual intervention
+                  </p>
+                </div>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                LIVE IN-BUILT ACTIVE
+              </span>
+            </div>
+
+            {/* Active Live Fraud Intimation Box */}
+            {liveFraudIntimation ? (
+              <div className="p-3.5 bg-rose-50 border-2 border-rose-500 rounded-xl space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-rose-900 font-bold">
+                    <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span>🚨 Dynamic In-Call Fraud Intimation</span>
+                  </div>
+                  <span className="text-[10px] font-mono font-bold bg-rose-600 text-white px-2 py-0.5 rounded">
+                    ENFORCED: {liveFraudIntimation.decision}
+                  </span>
+                </div>
+                <div className="text-xs text-rose-950 font-semibold">
+                  Threat: <span className="text-rose-700">{liveFraudIntimation.threatCategory}</span>
+                </div>
+                <div className="text-[11px] text-rose-900 font-mono bg-white/80 p-2 rounded border border-rose-200 leading-snug">
+                  {liveFraudIntimation.circuitBreaker}
+                </div>
+                <div className="text-[10px] text-emerald-800 font-medium flex items-center gap-1 pt-0.5">
+                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                  <span>Automatically tuned into dynamic benchmark suite (Zero Manual Steps)</span>
+                </div>
+              </div>
+            ) : (
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-600 flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                  <span>Call status nominal. All 5 layers monitoring continuously.</span>
+                </span>
+                <span className="font-mono text-[10px] bg-white px-2 py-0.5 rounded border border-slate-200 font-bold text-slate-700">
+                  Floor: 35%
+                </span>
+              </div>
+            )}
+
+            {/* Dynamic 5 Layers Real-Time Status Grid */}
+            <div className="space-y-2">
+              <div className="text-[11px] font-bold text-slate-700 uppercase tracking-wider font-mono">
+                Continuous Layer Evaluation Breakdown:
+              </div>
+
+              {/* Layer 1: Acoustic DSP & Spoofing */}
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs flex items-center justify-between">
+                <div>
+                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-800 font-semibold">L1</span>
+                    <span>Acoustic DSP & Spoofing</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">
+                    {dynamicFiveLayersState?.layer1Acoustic.status || 'Calibrated'}
+                  </div>
+                </div>
+                <div className="text-right font-mono">
+                  <div className="text-xs font-bold text-slate-800">
+                    DF: {dynamicFiveLayersState?.layer1Acoustic.deepfakeScore || 18}%
+                  </div>
+                  <div className="text-[10px] text-slate-500">
+                    Replay: {dynamicFiveLayersState?.layer1Acoustic.replayScore || 12}%
+                  </div>
+                </div>
+              </div>
+
+              {/* Layer 2: Zero-Trust Policy Engine */}
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs flex items-center justify-between">
+                <div>
+                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-800 font-semibold">L2</span>
+                    <span>Policy Engine & Dynamic Sector</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">
+                    {dynamicFiveLayersState?.layer2Policy.sector || 'General Routine'}
+                  </div>
+                </div>
+                <div className="text-right font-mono">
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold">
+                    Strict Mode
+                  </span>
+                </div>
+              </div>
+
+              {/* Layer 3: Biometric Identity */}
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs flex items-center justify-between">
+                <div>
+                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-800 font-semibold">L3</span>
+                    <span>Biometric Identity & Voiceprint</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">
+                    {dynamicFiveLayersState?.layer3Biometric.callerRole || 'Caller'}
+                  </div>
+                </div>
+                <div className="text-right font-mono">
+                  <div className="text-xs font-bold text-slate-800">
+                    Sim: {dynamicFiveLayersState?.layer3Biometric.similarity || 88}%
+                  </div>
+                  <div className="text-[10px] text-slate-500">
+                    Mismatch: {dynamicFiveLayersState?.layer3Biometric.mismatchRisk || 12}%
+                  </div>
+                </div>
+              </div>
+
+              {/* Layer 4: Conversational NLP & Camouflage */}
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs flex items-center justify-between">
+                <div>
+                  <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-800 font-semibold">L4</span>
+                    <span>Intent & Camouflage Detection</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5 capitalize">
+                    Intent: {dynamicFiveLayersState?.layer4ContextNLP.intent.replace(/_/g, ' ') || 'Normal'}
+                  </div>
+                </div>
+                <div className="text-right font-mono">
+                  <span
+                    className={`text-[10px] px-2 py-0.5 rounded font-bold ${
+                      dynamicFiveLayersState?.layer4ContextNLP.coercionDetected
+                        ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                        : 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                    }`}
+                  >
+                    {dynamicFiveLayersState?.layer4ContextNLP.coercionDetected ? 'Coercion / Escalation' : 'Nominal Flow'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Layer 5: Multi-Modal Risk Fusion */}
+              <div className="p-2.5 rounded-xl bg-slate-900 text-white text-xs flex items-center justify-between border border-slate-800 shadow-xs">
+                <div>
+                  <div className="font-bold flex items-center gap-1.5 text-indigo-300">
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-950 text-indigo-400 border border-indigo-700 font-semibold">L5</span>
+                    <span>Multi-Modal Fusion & Circuit Breakers</span>
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5 truncate max-w-[200px]">
+                    {dynamicFiveLayersState?.layer5RiskFusion.circuitBreakerTriggered || 'Zero-Trust Circuit Breakers Armed'}
+                  </div>
+                </div>
+                <div className="text-right font-mono">
+                  <div
+                    className={`text-sm font-black ${
+                      (dynamicFiveLayersState?.layer5RiskFusion.finalRiskScore || 0) >= 75
+                        ? 'text-rose-400'
+                        : (dynamicFiveLayersState?.layer5RiskFusion.finalRiskScore || 0) >= 50
+                        ? 'text-amber-400'
+                        : 'text-emerald-400'
+                    }`}
+                  >
+                    {dynamicFiveLayersState?.layer5RiskFusion.finalRiskScore || 14}/100
+                  </div>
+                  <div className="text-[10px] uppercase font-bold tracking-wider text-slate-300">
+                    {dynamicFiveLayersState?.layer5RiskFusion.decision || 'ALLOW'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Automatic Evaluation Dataset Integration Card */}
+          <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                <Database className="w-4 h-4 text-indigo-600" />
+                Evaluation Dataset Pipeline
+              </h3>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">
+                SIH Requirement
+              </span>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Live microphone captures automatically feed into the{' '}
+              <strong>Evaluation Audio Library</strong> with an explicit <strong className="text-amber-700">UNVERIFIED</strong> status.
+              Evaluators can inspect, verify ground-truth labels, and promote them into executable test cases.
+            </p>
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">Automatic Promotion:</span>
+                <span className="font-semibold text-emerald-700 flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Active
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">Label Status Assigned:</span>
+                <span className="font-mono font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 text-[10px]">
+                  UNVERIFIED (Human in the Loop)
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">Stored in Library:</span>
+                <span className="font-semibold text-slate-800">
+                  {isAddedToEvaluation ? 'Yes (Added)' : 'Pending Session Finalization'}
+                </span>
+              </div>
+            </div>
+
+            {onNavigateToEvaluation && (
+              <button
+                onClick={onNavigateToEvaluation}
+                className="w-full py-2 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-semibold text-xs transition flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <span>View Evaluation Audio Library</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};

@@ -177,6 +177,13 @@ export const RiskDecisionGauge: React.FC<RiskDecisionGaugeProps> = ({
             <span className="text-slate-500">Trigger Rule: </span>
             {policyDecision.triggeredThresholdRule}
           </div>
+
+          {fusionResult.isCircuitBreakerActive && (
+            <div className="mt-2.5 p-2.5 rounded-lg bg-rose-100 border border-rose-300 text-rose-950 text-xs font-semibold flex items-center gap-2">
+              <Ban className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{fusionResult.circuitBreakerTriggered}</span>
+            </div>
+          )}
         </div>
       </div>
 

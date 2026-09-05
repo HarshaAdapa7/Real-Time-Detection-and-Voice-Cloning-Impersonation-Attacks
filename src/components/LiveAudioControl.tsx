@@ -14,10 +14,18 @@ import {
   ShieldAlert, 
   ShieldCheck, 
   CheckCircle2, 
-  Globe 
+  Globe,
+  Zap,
+  BellRing,
+  Landmark,
+  Briefcase,
+  Terminal,
+  HeartPulse,
+  Antenna
 } from 'lucide-react';
 import { AudioFeatures, PreloadedScenario, ScenarioCategory } from '../types';
 import { PRELOADED_SCENARIOS } from '../data/contextDataset';
+import { DetectedSector } from '../services/sectorClassifier';
 
 interface LiveAudioControlProps {
   isStreaming: boolean;
@@ -30,6 +38,13 @@ interface LiveAudioControlProps {
   audioError: string | null;
   isPlayingScenarioAudio?: boolean;
   onToggleScenarioAudio?: (scenario: PreloadedScenario) => void;
+  detectedSector?: DetectedSector;
+  liveAlerts?: Array<{ id: string; timestamp: string; type: 'info' | 'warning' | 'danger' | 'success'; text: string }>;
+  interimTranscript?: string;
+  deepfakeScore?: number;
+  fusedRiskScore?: number;
+  micLanguage?: string;
+  onChangeMicLanguage?: (lang: string) => void;
 }
 
 const CATEGORY_TABS: Array<{ id: string; label: string; count: (scenarios: PreloadedScenario[]) => number }> = [
@@ -55,9 +70,28 @@ export const LiveAudioControl: React.FC<LiveAudioControlProps> = ({
   audioError,
   isPlayingScenarioAudio = false,
   onToggleScenarioAudio,
+  detectedSector,
+  liveAlerts = [],
+  interimTranscript = '',
+  deepfakeScore,
+  fusedRiskScore,
+  micLanguage = 'en-IN',
+  onChangeMicLanguage,
 }) => {
   const [filterCategory, setFilterCategory] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
+
+  const renderSectorIcon = (iconName?: string) => {
+    switch (iconName) {
+      case 'Landmark': return <Landmark className="w-4 h-4 text-sky-600" />;
+      case 'Briefcase': return <Briefcase className="w-4 h-4 text-purple-600" />;
+      case 'Antenna': return <Antenna className="w-4 h-4 text-orange-600" />;
+      case 'ShieldAlert': return <ShieldAlert className="w-4 h-4 text-rose-600" />;
+      case 'Terminal': return <Terminal className="w-4 h-4 text-emerald-600" />;
+      case 'HeartPulse': return <HeartPulse className="w-4 h-4 text-cyan-600" />;
+      default: return <Globe className="w-4 h-4 text-slate-600" />;
+    }
+  };
 
   const filteredScenarios = useMemo(() => {
     return PRELOADED_SCENARIOS.filter((s) => {
@@ -180,6 +214,30 @@ export const LiveAudioControl: React.FC<LiveAudioControlProps> = ({
               )}
             </button>
           )}
+
+          {/* Multilingual ASR Spoken Language Selector */}
+          {onChangeMicLanguage && (
+            <div className="flex items-center space-x-1.5 bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs shadow-2xs">
+              <Globe className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+              <span className="text-slate-500 font-medium text-[11px] hidden sm:inline">Mic Lang:</span>
+              <select
+                id="select-mic-language"
+                value={micLanguage}
+                onChange={(e) => onChangeMicLanguage(e.target.value)}
+                className="bg-transparent text-slate-800 font-semibold focus:outline-hidden text-xs cursor-pointer"
+                title="Select spoken speech recognition model language"
+              >
+                <option value="en-IN">English (Indian)</option>
+                <option value="hi-IN">हिन्दी (Hindi)</option>
+                <option value="te-IN">తెలుగు (Telugu)</option>
+                <option value="ta-IN">தமிழ் (Tamil)</option>
+                <option value="kn-IN">ಕನ್ನಡ (Kannada)</option>
+                <option value="bn-IN">বাংলা (Bengali)</option>
+                <option value="mr-IN">मराठी (Marathi)</option>
+                <option value="en-US">English (US)</option>
+              </select>
+            </div>
+          )}
         </div>
 
         {/* Live Audio Ingestion Telemetry */}
@@ -215,6 +273,116 @@ export const LiveAudioControl: React.FC<LiveAudioControlProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Dynamic Live Voice Analysis & Auto-Detected Sector Bar */}
+      {(isStreaming || isPlayingScenarioAudio || (detectedSector && detectedSector.id !== 'GENERAL_ROUTINE') || interimTranscript) && (
+        <div className="mb-5 rounded-xl border border-indigo-200 bg-gradient-to-r from-indigo-50/90 via-sky-50/70 to-purple-50/70 p-4 shadow-xs transition-all">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+            <div className="flex items-center space-x-2.5">
+              <div className="p-2 rounded-xl bg-white border border-indigo-200 text-indigo-700 shadow-2xs">
+                {detectedSector ? renderSectorIcon(detectedSector.icon) : <Zap className="w-4 h-4 text-indigo-600" />}
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] uppercase font-mono tracking-wider font-bold bg-indigo-600 text-white px-2 py-0.5 rounded">
+                    ⚡ AUTO-DETECTED SECTOR
+                  </span>
+                  <span className="text-xs font-bold text-slate-900">
+                    {detectedSector?.name || "Detecting industry sector..."}
+                  </span>
+                  <span className="text-[10px] font-mono font-semibold bg-white border border-indigo-200 px-2 py-0.5 rounded-full text-indigo-700">
+                    {detectedSector?.confidence || 50}% Confidence
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-600 mt-0.5">
+                  <strong className="text-slate-800">Dynamic Policy Auto-Tuning:</strong> {detectedSector?.policyFocus || "Calibrating risk weights from conversational keywords"}
+                  <span className="text-indigo-700 font-semibold ml-1.5">(No manual sector selection required)</span>
+                </p>
+              </div>
+            </div>
+
+            {/* Dynamic Status badges */}
+            <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+              {features.silenceRatio < 0.6 ? (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300 animate-pulse">
+                  <span className="w-2 h-2 rounded-full bg-emerald-600" />
+                  VOICE TALKING
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-white text-slate-600 border border-slate-200">
+                  <span className="w-2 h-2 rounded-full bg-slate-400" />
+                  LISTENING...
+                </span>
+              )}
+              {deepfakeScore !== undefined && (
+                <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-mono font-bold border ${
+                  deepfakeScore > 50
+                    ? 'bg-rose-100 text-rose-800 border-rose-300'
+                    : 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                }`}>
+                  Acoustic Deepfake: {deepfakeScore}%
+                </span>
+              )}
+              {fusedRiskScore !== undefined && (
+                <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-mono font-bold border ${
+                  fusedRiskScore > 70
+                    ? 'bg-rose-100 text-rose-800 border-rose-300'
+                    : fusedRiskScore > 35
+                    ? 'bg-amber-100 text-amber-800 border-amber-300'
+                    : 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                }`}>
+                  Live Risk: {fusedRiskScore}/100
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Live Streaming Utterance / Interim Voice Display */}
+          {interimTranscript && (
+            <div className="mb-3 p-2.5 rounded-lg bg-white/90 border border-indigo-200/90 text-xs text-slate-800 flex items-start gap-2 shadow-2xs">
+              <span className="w-2 h-2 rounded-full bg-indigo-600 animate-ping shrink-0 mt-1.5" />
+              <div className="flex-1">
+                <span className="text-[10px] font-mono text-indigo-600 font-bold uppercase tracking-wider block mb-0.5">
+                  Live Spoken Stream (Real-Time Ingestion):
+                </span>
+                <span className="italic font-medium text-slate-900">"{interimTranscript}"</span>
+              </div>
+            </div>
+          )}
+
+          {/* Live Threat Notification Ticker */}
+          {liveAlerts && liveAlerts.length > 0 && (
+            <div className="space-y-1.5 pt-2 border-t border-indigo-200/60">
+              <div className="flex items-center justify-between text-[11px] font-semibold text-slate-700">
+                <span className="flex items-center gap-1.5">
+                  <BellRing className="w-3.5 h-3.5 text-indigo-600" />
+                  Live Indications & Threat Alerts (Voice Running):
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono">Dynamic Real-Time Feed</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {liveAlerts.slice(0, 4).map((alert) => (
+                  <div
+                    key={alert.id}
+                    className={`text-[11px] px-2.5 py-1 rounded-lg border font-medium flex items-center gap-1.5 shadow-2xs transition-all ${
+                      alert.type === 'danger'
+                        ? 'bg-rose-50 text-rose-800 border-rose-200 font-bold'
+                        : alert.type === 'warning'
+                        ? 'bg-amber-50 text-amber-800 border-amber-200'
+                        : alert.type === 'success'
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                        : 'bg-white text-slate-700 border-slate-200'
+                    }`}
+                  >
+                    <span className="text-[10px] font-mono text-slate-400">{alert.timestamp}</span>
+                    <span>{alert.text}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Currently Active Call Acoustic & Test Banner */}
       {selectedScenario && (

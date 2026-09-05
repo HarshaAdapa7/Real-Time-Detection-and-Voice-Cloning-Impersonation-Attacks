@@ -28,10 +28,29 @@ export interface FusionInputs {
     nlp: number;
     context: number;
   };
+  otpCredentialRequested?: boolean;
+  financialDemandUrgent?: boolean;
+  digitalArrestExtortion?: boolean;
+  remoteAccessTrojan?: boolean;
+  scamPretext?: boolean;
+  threatCues?: string[];
 }
 
 export function fuseRiskSignals(inputs: FusionInputs): RiskFusionResult {
-  const { deepfakeScore, speakerSimilarity, replayScore, nlpScore, contextScore, weights } = inputs;
+  const {
+    deepfakeScore,
+    speakerSimilarity,
+    replayScore,
+    nlpScore,
+    contextScore,
+    weights,
+    otpCredentialRequested,
+    financialDemandUrgent,
+    digitalArrestExtortion,
+    remoteAccessTrojan,
+    scamPretext,
+    threatCues = [],
+  } = inputs;
 
   const speakerMismatchRisk = Math.max(0, 100 - speakerSimilarity);
 
@@ -52,7 +71,62 @@ export function fuseRiskSignals(inputs: FusionInputs): RiskFusionResult {
   const contextContribution = Number((contextScore * wNorm.context).toFixed(1));
 
   const rawSum = deepfakeContribution + speakerContribution + replayContribution + nlpContribution + contextContribution;
-  const finalRiskScore = Math.round(Math.min(Math.max(rawSum, 0), 100));
+  let finalRiskScore = Math.round(Math.min(Math.max(rawSum, 0), 100));
+
+  // --- ZERO-TRUST DEFENSE-IN-DEPTH: CRITICAL THREAT CIRCUIT BREAKERS ---
+  // In real telecom & banking security, P0 attack vectors (e.g. demanding OTP/passwords,
+  // high-urgency financial wire exfiltration, digital arrest coercion, or extreme synthetic voice)
+  // must NEVER be diluted or masked by benign acoustic silence or baseline profile matching.
+  let circuitBreakerTriggered: string | undefined;
+
+  const hasOtpEvidence =
+    Boolean(otpCredentialRequested) ||
+    (nlpScore >= 75 && threatCues.some((c) => /otp|credential|password|pin|verification code|one-time/i.test(c)));
+
+  const hasDigitalArrestEvidence =
+    Boolean(digitalArrestExtortion) ||
+    (nlpScore >= 65 && threatCues.some((c) => /digital arrest|police|cbi|customs|court|warrant|fir|law enforcement|arrest/i.test(c)));
+
+  const hasUrgentWireEvidence =
+    Boolean(financialDemandUrgent) ||
+    (nlpScore >= 75 && (contextScore >= 45 || threatCues.some((c) => /wire|transfer|rtgs|neft|lakh|rupees|paise|crore|send money/i.test(c))));
+
+  const hasRemoteAccessEvidence =
+    Boolean(remoteAccessTrojan) ||
+    (nlpScore >= 70 && threatCues.some((c) => /anydesk|teamviewer|rustdesk|apk|remote access|screen share/i.test(c)));
+
+  const hasScamPretextEvidence =
+    Boolean(scamPretext) ||
+    (nlpScore >= 70 && threatCues.some((c) => /electricity bill|power cut|kyc|lottery|task job/i.test(c)));
+
+  if (hasOtpEvidence) {
+    finalRiskScore = Math.max(finalRiskScore, 92);
+    circuitBreakerTriggered = '⚡ P0 Security Circuit-Breaker: Unauthorized OTP / Credential Harvesting solicitation detected (Risk Floor locked at 92% -> Immediate BLOCK)';
+  } else if (hasDigitalArrestEvidence) {
+    finalRiskScore = Math.max(finalRiskScore, 89);
+    circuitBreakerTriggered = '⚡ P0 Security Circuit-Breaker: Law Enforcement / Digital Arrest Coercion Extortion detected (Risk Floor locked at 89% -> Immediate BLOCK)';
+  } else if (hasRemoteAccessEvidence) {
+    finalRiskScore = Math.max(finalRiskScore, 88);
+    circuitBreakerTriggered = '⚡ P0 Security Circuit-Breaker: Remote Access Trojan / Screen Sharing solicitation (Risk Floor locked at 88% -> Immediate BLOCK)';
+  } else if (hasUrgentWireEvidence) {
+    finalRiskScore = Math.max(finalRiskScore, 86);
+    circuitBreakerTriggered = '⚡ P0 Security Circuit-Breaker: High-Urgency Unverified Financial Transfer solicitation detected (Risk Floor locked at 86% -> Immediate BLOCK)';
+  } else if (hasScamPretextEvidence) {
+    finalRiskScore = Math.max(finalRiskScore, 82);
+    circuitBreakerTriggered = '⚡ Pretext Security Circuit-Breaker: Utility disconnection / KYC urgency trope detected (Risk locked at 82% -> Immediate BLOCK)';
+  } else if (deepfakeScore >= 70) {
+    finalRiskScore = Math.max(finalRiskScore, 85);
+    circuitBreakerTriggered = `⚡ Acoustic Circuit-Breaker: High Synthetic Vocal Tract / Neural Vocoder detected (${deepfakeScore}% -> Immediate BLOCK)`;
+  } else if (replayScore >= 75) {
+    finalRiskScore = Math.max(finalRiskScore, 82);
+    circuitBreakerTriggered = `⚡ Acoustic Circuit-Breaker: High Loudspeaker Replay Channel Loop detected (${replayScore}% -> Immediate BLOCK)`;
+  } else if (speakerMismatchRisk >= 65 && contextScore >= 40) {
+    finalRiskScore = Math.max(finalRiskScore, 78);
+    circuitBreakerTriggered = `⚡ Identity Circuit-Breaker: Severe Biometric Disparity for Privileged Caller Role (${speakerMismatchRisk}% Mismatch)`;
+  } else if (nlpScore >= 78) {
+    finalRiskScore = Math.max(finalRiskScore, 78);
+    circuitBreakerTriggered = `⚡ NLP Security Circuit-Breaker: High Social Engineering & Coercion Intent (${nlpScore}%)`;
+  }
 
   // Determine Risk Level
   let riskLevel: RiskLevel;
@@ -71,13 +145,16 @@ export function fuseRiskSignals(inputs: FusionInputs): RiskFusionResult {
     { name: "Voice Deepfake / Synthetic Artifacts", value: deepfakeContribution },
     { name: "Speaker Biometric Mismatch", value: speakerContribution },
     { name: "Replay / Acoustic Channel Anomaly", value: replayContribution },
-    { name: "Social Engineering & Coercion (Gemini NLP)", value: nlpContribution },
+    { name: "Social Engineering & Coercion (Gemini NLP)", value: circuitBreakerTriggered ? 90 : nlpContribution },
     { name: "Context / Transaction Policy Violation", value: contextContribution },
   ];
   signalMap.sort((a, b) => b.value - a.value);
-  const dominantRiskFactor = signalMap[0].name;
+  const dominantRiskFactor = circuitBreakerTriggered ? circuitBreakerTriggered.split(':')[1]?.trim() || signalMap[0].name : signalMap[0].name;
 
-  const formulaString = `Risk = (${deepfakeScore}×${(wNorm.deepfake).toFixed(2)}) + (${speakerMismatchRisk}×${(wNorm.speaker).toFixed(2)}) + (${replayScore}×${(wNorm.replay).toFixed(2)}) + (${nlpScore}×${(wNorm.nlp).toFixed(2)}) + (${contextScore}×${(wNorm.context).toFixed(2)}) = ${finalRiskScore}`;
+  let formulaString = `Risk = (${deepfakeScore}×${(wNorm.deepfake).toFixed(2)}) + (${speakerMismatchRisk}×${(wNorm.speaker).toFixed(2)}) + (${replayScore}×${(wNorm.replay).toFixed(2)}) + (${nlpScore}×${(wNorm.nlp).toFixed(2)}) + (${contextScore}×${(wNorm.context).toFixed(2)}) = ${rawSum.toFixed(1)}`;
+  if (circuitBreakerTriggered) {
+    formulaString += ` -> Elevated to ${finalRiskScore} (Active Circuit-Breaker)`;
+  }
 
   return {
     finalRiskScore,
@@ -92,5 +169,7 @@ export function fuseRiskSignals(inputs: FusionInputs): RiskFusionResult {
     weights: wNorm,
     dominantRiskFactor,
     formulaString,
+    circuitBreakerTriggered,
+    isCircuitBreakerActive: Boolean(circuitBreakerTriggered),
   };
 }

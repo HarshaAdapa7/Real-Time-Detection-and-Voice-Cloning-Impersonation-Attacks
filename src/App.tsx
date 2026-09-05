@@ -15,7 +15,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Header } from './components/Header';
+import { Header, AppTab } from './components/Header';
 import { PipelineVisualizer } from './components/PipelineVisualizer';
 import { LiveAudioControl } from './components/LiveAudioControl';
 import { ConversationIntelPanel } from './components/ConversationIntelPanel';
@@ -26,6 +26,8 @@ import { IntegrationApiPanel } from './components/IntegrationApiPanel';
 import { AuditLogView } from './components/AuditLogView';
 import { PolicyConfigModal } from './components/PolicyConfigModal';
 import { ResearchDisclosureModal } from './components/ResearchDisclosureModal';
+import { LiveVoiceIntelligence } from './components/LiveVoiceIntelligence';
+import { EvaluationAudioLibrary } from './components/EvaluationAudioLibrary';
 
 import { 
   TenantConfig, 
@@ -43,15 +45,16 @@ import { DEFAULT_TENANTS, evaluatePolicy } from './services/policyEngine';
 import { computeDeepfakeSignal } from './services/deepfakeSignal';
 import { computeSpeakerSignal } from './services/speakerSignal';
 import { computeReplaySignal } from './services/replaySignal';
-import { evaluateConversationRisk } from './services/nlpSignal';
+import { evaluateConversationRisk, evaluateTextHeuristics } from './services/nlpSignal';
 import { evaluateContextRisk } from './services/contextSignal';
 import { fuseRiskSignals } from './services/riskFusion';
+import { classifySpokenSector, DetectedSector } from './services/sectorClassifier';
 import { ENROLLED_PROFILES, PRELOADED_SCENARIOS } from './data/contextDataset';
 import { AudioStreamManager, ScenarioAudioPlayer } from './utils/audioProcessor';
 
 export default function App() {
   // Navigation & View State
-  const [activeTab, setActiveTab] = useState<'firewall' | 'api' | 'audit'>('firewall');
+  const [activeTab, setActiveTab] = useState<AppTab>('firewall');
   const [selectedLayer, setSelectedLayer] = useState<number | null>(null);
   const [isPolicyModalOpen, setIsPolicyModalOpen] = useState(false);
   const [isDisclosureModalOpen, setIsDisclosureModalOpen] = useState(false);
@@ -95,6 +98,23 @@ export default function App() {
     reasoning: "Demands immediate ₹25,00,000 transfer while commanding silence and bypassing standard verification.",
     isRealGemini: true,
   });
+
+  // Dynamic Spoken Sector & Real-Time Indications (Automatic Detection from Voice)
+  const [micLanguage, setMicLanguage] = useState<string>('en-IN');
+  const [interimTranscript, setInterimTranscript] = useState<string>('');
+  const [detectedSector, setDetectedSector] = useState<DetectedSector>(() => classifySpokenSector(PRELOADED_SCENARIOS[0].sampleTranscript));
+  const [liveAlerts, setLiveAlerts] = useState<Array<{ id: string; timestamp: string; type: 'info' | 'warning' | 'danger' | 'success'; text: string }>>([
+    { id: '1', timestamp: 'Ready', type: 'info', text: 'Voice Trust Engine online. Dynamic sector & threat analysis active.' },
+    { id: '2', timestamp: 'Calibrated', type: 'success', text: 'Banking & Financial Services policy profile calibrated.' },
+  ]);
+
+  const addLiveAlert = useCallback((type: 'info' | 'warning' | 'danger' | 'success', text: string) => {
+    const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setLiveAlerts((prev) => {
+      if (prev.some((a) => a.text === text)) return prev;
+      return [{ id: `${Date.now()}-${Math.random()}`, timestamp: time, type, text }, ...prev.slice(0, 6)];
+    });
+  }, []);
 
   // Context Engine State (Layer 5)
   const [selectedProfile, setSelectedProfile] = useState<ContextProfile>(ENROLLED_PROFILES[0]);
@@ -209,23 +229,25 @@ export default function App() {
   };
 
   // Layer 3 Signals (Deepfake, Speaker, Replay)
+  // When live microphone is active (isStreaming), use isLiveMic = true to calculate dynamic acoustic score from user's voice
   const deepfakeResult = computeDeepfakeSignal(
     audioFeatures,
-    selectedScenario?.baseDeepfake,
-    chunkCount
+    isStreaming ? undefined : selectedScenario?.baseDeepfake,
+    chunkCount,
+    isStreaming
   );
 
   const speakerResult = computeSpeakerSignal(
     selectedProfile.id,
     selectedProfile.name,
     audioFeatures,
-    selectedScenario?.baseSpeakerSim,
+    isStreaming ? undefined : selectedScenario?.baseSpeakerSim,
     chunkCount
   );
 
   const replayResult = computeReplaySignal(
     audioFeatures,
-    selectedScenario?.baseReplay,
+    isStreaming ? undefined : selectedScenario?.baseReplay,
     chunkCount
   );
 
@@ -268,6 +290,15 @@ export default function App() {
       setIsAnalyzingNlp(false);
     }
   }, [transcript, selectedProfile, requestedAction, requestedAmount]);
+
+  // Microphone language change handler
+  const handleMicLanguageChange = (lang: string) => {
+    setMicLanguage(lang);
+    if (audioManagerRef.current) {
+      audioManagerRef.current.setLanguage(lang);
+    }
+    addLiveAlert('info', `🌐 Microphone recognition language updated to ${lang}`);
+  };
 
   // Microphone toggle handler
   const handleToggleMic = async () => {
@@ -327,11 +358,52 @@ export default function App() {
           setAudioFeatures(features);
           setChunkCount(count);
         },
+        onLiveFeatures: (features) => {
+          setAudioFeatures(features);
+        },
         onTranscript: (liveText, isFinal) => {
-          setTranscript((prev) => {
-            const updated = isFinal ? `${prev} ${liveText}`.trim() : `${prev.split('. ').slice(0, -1).join('. ')} ${liveText}`.trim();
-            return updated;
-          });
+          if (!liveText) return;
+
+          setInterimTranscript(liveText);
+
+          let cumulative = transcript;
+          if (isFinal) {
+            cumulative = `${transcript} ${liveText}`.trim();
+            setTranscript(cumulative);
+            setInterimTranscript('');
+          } else {
+            cumulative = `${transcript} ${liveText}`.trim();
+          }
+
+          const textToAnalyze = cumulative || liveText;
+
+          // 1. Dynamic Spoken Sector Classification from user input
+          const sector = classifySpokenSector(textToAnalyze);
+          setDetectedSector(sector);
+          if (sector.id !== 'GENERAL_ROUTINE') {
+            setCurrentTenant((prev) => ({
+              ...prev,
+              weights: sector.defaultWeights,
+            }));
+            addLiveAlert('info', `⚡ Auto-tuned sector to ${sector.name} (${sector.confidence}% confidence)`);
+          }
+
+          // 2. Real-time fast conversational heuristics (0ms instantaneous updates)
+          const fastNlp = evaluateTextHeuristics(textToAnalyze);
+          setNlpResult(fastNlp);
+
+          if (fastNlp.urgencyScore > 50) {
+            addLiveAlert('warning', '⚠️ Urgency Coercion: Immediate pressure detected in speech');
+          }
+          if (fastNlp.financialRequestDetected) {
+            addLiveAlert('danger', '🚨 Financial Exfiltration: Transfer instruction detected');
+          }
+          if (fastNlp.otpCredentialRequestDetected) {
+            addLiveAlert('danger', '🛡️ Credential Intercept: OTP or sensitive authentication code request');
+          }
+          if (fastNlp.secrecyScore > 60) {
+            addLiveAlert('warning', '🔒 Secrecy Demand: Request to isolate victim or maintain silence');
+          }
         },
         onVolumeChange: (vol) => {
           setAudioVolume(vol);
@@ -342,6 +414,7 @@ export default function App() {
         },
       });
 
+      manager.setLanguage(micLanguage);
       const started = await manager.startMicrophone();
       if (started) {
         audioManagerRef.current = manager;
@@ -357,6 +430,21 @@ export default function App() {
     setRequestedAction(scen.action);
     setRequestedAmount(scen.amount);
     setStepUpResolved(false);
+
+    // Auto-detect sector for the selected scenario
+    const sector = classifySpokenSector(scen.sampleTranscript);
+    setDetectedSector(sector);
+    if (sector.id !== 'GENERAL_ROUTINE') {
+      setCurrentTenant((prev) => ({
+        ...prev,
+        weights: sector.defaultWeights,
+      }));
+      addLiveAlert('info', `⚡ Calibrated sector to ${sector.name} (${sector.confidence}% match)`);
+    }
+
+    // Immediate fast heuristics
+    const fastNlp = evaluateTextHeuristics(scen.sampleTranscript);
+    setNlpResult(fastNlp);
 
     // Find profile
     const prof = ENROLLED_PROFILES.find((p) => p.id === scen.claimedSpeaker) || ENROLLED_PROFILES[0];
@@ -563,6 +651,13 @@ export default function App() {
                   audioError={audioError}
                   isPlayingScenarioAudio={isPlayingScenarioAudio}
                   onToggleScenarioAudio={handleToggleScenarioAudio}
+                  detectedSector={detectedSector}
+                  liveAlerts={liveAlerts}
+                  interimTranscript={interimTranscript}
+                  deepfakeScore={deepfakeResult.score}
+                  fusedRiskScore={fusionResult.finalRiskScore}
+                  micLanguage={micLanguage}
+                  onChangeMicLanguage={handleMicLanguageChange}
                 />
 
                 {/* Layer 4: Conversation Intelligence (Gemini NLP) */}
@@ -649,6 +744,19 @@ export default function App() {
               </div>
             </div>
           </>
+        )}
+
+        {/* Tab: Live Microphone Capture & Real-Time Security Intelligence */}
+        {activeTab === 'live_intel' && (
+          <LiveVoiceIntelligence
+            currentTenant={currentTenant}
+            onNavigateToEvaluation={() => setActiveTab('evaluation_library')}
+          />
+        )}
+
+        {/* Tab: Evaluation Audio Library & Automatic Dataset Integration */}
+        {activeTab === 'evaluation_library' && (
+          <EvaluationAudioLibrary />
         )}
 
         {/* Tab 2: Outbound Integration & API Inspector (Layer 9) */}
