@@ -590,7 +590,9 @@ app.post("/api/live-sessions/:id/audio-chunk", async (req, res) => {
   }
 });
 
-// Real-Time Multilingual Audio Transcription Endpoint (Gemini 3.6 Flash / Indic Multimodal)
+// Real-Time Multilingual Audio Transcription Endpoint (Gemini Flash / Indic Multimodal)
+let asrQuotaCooldownUntil = 0;
+
 app.post("/api/transcribe-audio", async (req, res) => {
   try {
     const {
@@ -605,13 +607,21 @@ app.post("/api/transcribe-audio", async (req, res) => {
       return res.status(400).json({ error: "Audio data (base64 or data URL) is required for transcription" });
     }
 
-    const ai = getGeminiClient();
-    if (!ai) {
-      return res.status(503).json({
-        error: "Gemini API key is not configured on server",
-        fallback: true,
+    // If quota cooldown is active, return graceful empty result without hitting Gemini
+    if (Date.now() < asrQuotaCooldownUntil) {
+      return res.json({
+        transcript: "",
+        englishTranslation: "",
+        detectedLanguage: languageHint || "en",
+        confidence: 0,
+        cues: [],
+        isSpeechDetected: false,
+        quotaExceeded: true,
+        message: "Gemini ASR quota limit reached. Browser native Speech Recognition is actively handling voice.",
       });
     }
+
+    const ai = getGeminiClient();
 
     // Clean audio base64
     let cleanBase64 = audio.trim();
@@ -635,7 +645,7 @@ Critical Guidelines:
 1. If the speaker speaks in Telugu, Hindi, Tamil, Kannada, or Bengali, transcribe in the authentic native script (or accurate Romanized transliteration if natural conversational code-mixing).
 2. Provide an English translation of what was spoken.
 3. Detect the primary language (e.g., "te", "hi", "ta", "kn", "en", "mr", "bn").
-4. Identify any social engineering, banking fraud, urgency, digital arrest, police impersonation, or OTP harvesting keywords present.
+4. Identify any social engineering, banking fraud, urgency, digital arrest, police impersonation, call merging, conference bridge hijack, or OTP harvesting keywords present.
 5. If the audio is purely background noise, silence, or non-speech hiss, set "isSpeechDetected": false, "transcript": "", and "confidence": 0.
 
 Return strictly valid JSON with this schema:
@@ -644,62 +654,82 @@ Return strictly valid JSON with this schema:
   "englishTranslation": "English translation if spoken in an Indic vernacular, or identical if English",
   "detectedLanguage": "te" | "hi" | "ta" | "kn" | "en" | "mr" | "bn" | "other",
   "confidence": number between 0.0 and 1.0,
-  "cues": ["array of fraud or intent keywords found, e.g. otp, arrest, wire, urgent"],
+  "cues": ["array of fraud or intent keywords found, e.g. call merge, otp, arrest, wire, urgent"],
   "isSpeechDetected": boolean
 }`;
 
-    const modelsToAttempt = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-flash-lite-latest"];
+    // Only attempt models that support multimodal audio input (gemini-3.1-flash-lite does NOT support audio)
+    const modelsToAttempt = ["gemini-2.5-flash", "gemini-flash-latest"];
     let responseText: string | null = null;
     let lastErr: any = null;
 
-    for (const model of modelsToAttempt) {
-      try {
-        const result = await ai.models.generateContent({
-          model,
-          contents: [
-            {
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: standardMime,
-                    data: cleanBase64,
+    if (ai) {
+      for (const model of modelsToAttempt) {
+        try {
+          const result = await ai.models.generateContent({
+            model,
+            contents: [
+              {
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: standardMime,
+                      data: cleanBase64,
+                    },
                   },
-                },
-                { text: prompt },
-              ],
+                  { text: prompt },
+                ],
+              },
+            ],
+            config: {
+              responseMimeType: "application/json",
             },
-          ],
-          config: {
-            responseMimeType: "application/json",
-          },
-        });
-        if (result?.text) {
-          responseText = result.text.trim();
-          break;
+          });
+          if (result?.text) {
+            responseText = result.text.trim();
+            break;
+          }
+        } catch (err: any) {
+          lastErr = err;
+          const errMsg = err?.message || String(err);
+          const isQuota = err?.status === 429 || errMsg.includes("429") || errMsg.includes("quota") || errMsg.includes("RESOURCE_EXHAUSTED");
+          
+          if (isQuota) {
+            // Set 45s cooldown to prevent API hammering
+            asrQuotaCooldownUntil = Date.now() + 45000;
+            console.warn(`Gemini ASR quota exhausted on model ${model}. Pausing cloud ASR for 45s; browser Web Speech continues.`);
+            break; // Stop trying other models when project quota is exhausted
+          } else {
+            console.warn(`ASR transcription attempt failed on model ${model}:`, errMsg);
+          }
         }
-      } catch (err: any) {
-        lastErr = err;
-        console.warn(`ASR transcription attempt failed on model ${model}:`, err.message || err);
       }
     }
 
-    if (!responseText) {
-      return res.status(500).json({
-        error: "Failed to transcribe audio with Gemini",
-        details: lastErr?.message,
-      });
-    }
-
     let parsed: any;
-    try {
-      const cleanJson = responseText.replace(/```json/gi, "").replace(/```/g, "").trim();
-      parsed = JSON.parse(cleanJson);
-    } catch {
+    if (responseText) {
+      try {
+        const cleanJson = responseText.replace(/```json/gi, "").replace(/```/g, "").trim();
+        parsed = JSON.parse(cleanJson);
+      } catch {
+        parsed = {
+          transcript: responseText,
+          detectedLanguage: languageHint || "en",
+          confidence: 0.85,
+          isSpeechDetected: Boolean(responseText && responseText.length > 2),
+          cues: ["neural_speech_detected"],
+        };
+      }
+    } else {
+      // Clean non-mock fallback: If Gemini API does not detect speech or is unconfigured,
+      // return clean empty speech detection rather than fabricating fake dialogue.
       parsed = {
-        transcript: responseText,
+        transcript: "",
+        englishTranslation: "",
         detectedLanguage: languageHint || "en",
-        confidence: 0.8,
-        isSpeechDetected: Boolean(responseText && responseText.length > 2),
+        confidence: 0,
+        cues: [],
+        isSpeechDetected: false,
       };
     }
 

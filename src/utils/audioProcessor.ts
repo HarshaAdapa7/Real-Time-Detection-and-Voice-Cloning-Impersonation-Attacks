@@ -25,6 +25,7 @@ export class AudioStreamManager {
   private analyser: AnalyserNode | null = null;
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
+  private recentAudioSlices: Blob[] = [];
   private recognition: any = null;
   private isRunning = false;
   private isPaused = false;
@@ -45,21 +46,46 @@ export class AudioStreamManager {
   }
 
   public setLanguage(langCode: string) {
-    this.activeLanguage = langCode.includes('-') ? langCode : `${langCode}-IN`;
-    if (this.recognition) {
-      try {
-        this.recognition.lang = this.activeLanguage;
-        if (this.isRunning && !this.isPaused) {
-          try {
-            this.recognition.stop();
-          } catch {
-            // Handled by onend
-          }
-        }
-      } catch {
-        // Ignored
-      }
+    const codeMap: Record<string, string> = {
+      en: 'en-IN',
+      hi: 'hi-IN',
+      te: 'te-IN',
+      ta: 'ta-IN',
+      kn: 'kn-IN',
+      ml: 'ml-IN',
+      mr: 'mr-IN',
+      bn: 'bn-IN',
+      auto: 'en-IN',
+    };
+    this.activeLanguage = codeMap[langCode] || (langCode.includes('-') ? langCode : `${langCode}-IN`);
+    if (this.isRunning && !this.isPaused) {
+      this.scheduleRecognitionRestart(100);
     }
+  }
+
+  public getRecentAudioBlob(): Blob | null {
+    if (this.recentAudioSlices.length === 0) return this.getRecordedBlob();
+    const type = this.recentAudioSlices[0]?.type || 'audio/webm';
+    return new Blob(this.recentAudioSlices, { type });
+  }
+
+  private detectLanguageFromText(text: string): string | null {
+    if (/[\u0C00-\u0C7F]/.test(text) || /\b(nenu|meeku|cheppandi|ivvandi|unnara|chesamu|kaluputunnanu|matladutunnanu|dabbu|khata|pampandi|ippude|ventane|babu|andi)\b/i.test(text)) {
+      return 'te';
+    }
+    if (/[\u0900-\u097F]/.test(text) || /\b(aap|kripya|batao|bhejo|bataiye|kardo|hoga|raha|hai|nahi|paise|khata|abhi|turant|line)\b/i.test(text)) {
+      return 'hi';
+    }
+    if (/[\u0B80-\u0BFF]/.test(text) || /\b(ungal|sollunga|anupunga|kudunga|pannunga|panam)\b/i.test(text)) {
+      return 'ta';
+    }
+    if (/[\u0C80-\u0CFF]/.test(text) || /\b(nimma|heli|kodi|kaluhisi|hana)\b/i.test(text)) {
+      return 'kn';
+    }
+    if (/[\u0980-\u09FF]/.test(text) || /\b(apnar|taka|pathan|bolun)\b/i.test(text)) {
+      return 'bn';
+    }
+    return null;
   }
 
   public async startMicrophone(): Promise<boolean> {
@@ -145,6 +171,10 @@ export class AudioStreamManager {
       this.mediaRecorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
           this.recordedChunks.push(event.data);
+          this.recentAudioSlices.push(event.data);
+          if (this.recentAudioSlices.length > 2) {
+            this.recentAudioSlices.shift();
+          }
           if (this.callbacks.onAudioChunkReady) {
             const chunkBlob = new Blob([event.data], { type: event.data.type || 'audio/webm' });
             const reader = new FileReader();
@@ -216,6 +246,32 @@ export class AudioStreamManager {
     });
   }
 
+  private scheduleRecognitionRestart(delayMs = 150) {
+    if (this.recognitionRestartTimer) {
+      clearTimeout(this.recognitionRestartTimer);
+    }
+    this.recognitionRestartTimer = setTimeout(() => {
+      if (this.isRunning && !this.isPaused) {
+        this.recreateSpeechRecognition();
+      }
+    }, delayMs);
+  }
+
+  private recreateSpeechRecognition() {
+    if (this.recognition) {
+      try {
+        this.recognition.onresult = null;
+        this.recognition.onerror = null;
+        this.recognition.onend = null;
+        this.recognition.abort();
+      } catch {
+        // Ignored
+      }
+      this.recognition = null;
+    }
+    this.initSpeechRecognition();
+  }
+
   private initSpeechRecognition() {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -245,6 +301,15 @@ export class AudioStreamManager {
         
         const trimmedFinal = final.trim();
         const trimmedInterim = interim.trim();
+        const anyText = trimmedFinal || trimmedInterim;
+
+        // Dynamic multi-lingual recognition on the fly
+        if (anyText) {
+          const detectedLang = this.detectLanguageFromText(anyText);
+          if (detectedLang && this.callbacks.onLanguageDetected) {
+            this.callbacks.onLanguageDetected(detectedLang);
+          }
+        }
 
         if (trimmedFinal) {
           if (this.interimCommitTimer) {
@@ -257,7 +322,7 @@ export class AudioStreamManager {
           this.pendingInterimText = trimmedInterim;
           this.callbacks.onTranscript(trimmedInterim, false);
 
-          // Auto-commit timer: If speaker pauses for 1000ms, commit as a finalized turn to prevent dropped speech
+          // Fast 450ms commit timer: Minimizes stream lag while preventing truncated utterances
           if (this.interimCommitTimer) {
             clearTimeout(this.interimCommitTimer);
           }
@@ -267,17 +332,27 @@ export class AudioStreamManager {
               this.pendingInterimText = '';
               this.callbacks.onTranscript(textToCommit, true);
             }
-          }, 1100);
+          }, 450);
         }
       };
 
       this.recognition.onerror = (e: any) => {
-        // Non-fatal error recovery for no-speech or network hiccups
-        if (e?.error === 'no-speech' || e?.error === 'network') {
-          // Normal pause in speech, will auto-recover
+        // 'no-speech' is NORMAL when user pauses - do NOT abort or destroy continuous recognizer!
+        if (e?.error === 'no-speech') {
+          return;
+        }
+        if (e?.error === 'aborted') {
+          return;
+        }
+        if (e?.error === 'network') {
+          // In sandboxed iframes or offline regional ASR, trigger immediate neural audio chunk fallback
+          console.warn("SpeechRecognition cloud network notice, activating neural chunk ASR fallback");
+          this.transcribeRecentAudioChunk();
+          this.scheduleRecognitionRestart(800);
           return;
         }
         console.warn("SpeechRecognition notice:", e?.error || e);
+        this.scheduleRecognitionRestart(400);
       };
 
       this.recognition.onend = () => {
@@ -288,29 +363,20 @@ export class AudioStreamManager {
           this.callbacks.onTranscript(textToCommit, true);
         }
 
-        // Resilient debounce restart (prevents InvalidStateError in Chromium)
-        if (this.recognitionRestartTimer) {
-          clearTimeout(this.recognitionRestartTimer);
-        }
-        this.recognitionRestartTimer = setTimeout(() => {
-          if (this.isRunning && !this.isPaused) {
-            try {
-              if (this.recognition) {
-                this.recognition.start();
-              } else {
-                this.initSpeechRecognition();
-              }
-            } catch {
-              // If start threw InvalidStateError or object is stale, recreate instance
-              this.initSpeechRecognition();
-            }
+        // If continuous recognition ends while listening is still active, smoothly restart
+        if (this.isRunning && !this.isPaused) {
+          try {
+            this.recognition.start();
+          } catch {
+            this.scheduleRecognitionRestart(300);
           }
-        }, 300);
+        }
       };
 
       this.recognition.start();
     } catch (err) {
       console.warn("Could not start SpeechRecognition:", err);
+      this.scheduleRecognitionRestart(400);
     }
   }
 
@@ -332,22 +398,22 @@ export class AudioStreamManager {
       const normalizedVol = Math.min(avg / 128, 1);
       this.callbacks.onVolumeChange(normalizedVol);
 
-      // Track voice activity if speech energy detected
+      // Sensitive voice activity detection (0.015 captures soft headphone/laptop speech)
       const now = performance.now();
       const wallNow = Date.now();
-      if (normalizedVol > 0.07) {
+      if (normalizedVol > 0.015) {
         this.lastVoiceActivityTime = wallNow;
       }
 
-      // Speech Recognition Watchdog: if user is speaking but Web Speech API is silent for >3.5s
-      if (now - lastWatchdogCheck > 2500) {
+      // Anti-Idle & Keepalive Watchdog (runs every 1.5s)
+      if (now - lastWatchdogCheck > 1500) {
         lastWatchdogCheck = now;
-        const speechActiveRecently = wallNow - this.lastVoiceActivityTime < 2000;
-        const speechStalled = wallNow - this.lastTranscriptTime > 4000;
+        const speechActiveRecently = wallNow - this.lastVoiceActivityTime < 2200;
+        const speechStalled = wallNow - this.lastTranscriptTime > 3500;
 
-        if (speechActiveRecently && speechStalled && !this.isTranscribingChunk && this.isRunning && !this.isPaused) {
-          // Attempt neural transcription via Gemini for the recent audio buffer
-          this.transcribeRecentAudioChunk();
+        // Keepalive: If recognition became dead/idle or stopped firing during active speech, resurrect it
+        if (speechStalled && this.isRunning && !this.isPaused && speechActiveRecently) {
+          this.scheduleRecognitionRestart(100);
         }
       }
 
@@ -372,8 +438,8 @@ export class AudioStreamManager {
 
     try {
       this.isTranscribingChunk = true;
-      const blob = explicitBlob || this.getRecordedBlob();
-      if (!blob || blob.size < 4000) return; // Ignore empty / click noise
+      const blob = explicitBlob || this.getRecentAudioBlob() || this.getRecordedBlob();
+      if (!blob || blob.size < 300) return; // Process any audible chunk
 
       const reader = new FileReader();
       reader.onloadend = async () => {
@@ -411,6 +477,44 @@ export class AudioStreamManager {
     } catch {
       this.isTranscribingChunk = false;
     }
+  }
+
+  /**
+   * Directly transcribe an explicit audio blob and return the parsed result
+   */
+  public async transcribeExplicitAudio(blob: Blob, langHint?: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        try {
+          const base64Url = reader.result as string;
+          const targetLang = langHint || this.activeLanguage.split('-')[0] || 'auto';
+          const res = await fetch('/api/transcribe-audio', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              audio: base64Url,
+              mimeType: blob.type || 'audio/webm',
+              languageHint: targetLang,
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            resolve(data);
+          } else {
+            reject(new Error(`Server returned ${res.status}`));
+          }
+        } catch (e) {
+          reject(e);
+        }
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  public getRecordedChunksCount(): number {
+    return this.recordedChunks.length;
   }
 
   public extractCurrentFeatures(): AudioFeatures {
@@ -511,6 +615,7 @@ export class AudioStreamManager {
       }
       this.mediaRecorder = null;
     }
+    this.recentAudioSlices = [];
     if (this.recognition) {
       try {
         this.recognition.stop();

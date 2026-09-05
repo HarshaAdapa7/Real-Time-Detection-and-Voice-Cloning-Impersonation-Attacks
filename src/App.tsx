@@ -551,7 +551,21 @@ export default function App() {
     fetchAuditLogs();
   }, [fetchDbStatus, fetchAuditLogs]);
 
-  // Cleanup mic and scenario audio on unmount
+  // Cleanup mic, scenario audio, and speech synthesis when tab changes or unmounts
+  useEffect(() => {
+    if (scenarioPlayerRef.current) {
+      scenarioPlayerRef.current.stop();
+      setIsPlayingScenarioAudio(false);
+    }
+    if (isStreaming && audioManagerRef.current) {
+      audioManagerRef.current.stop();
+      setIsStreaming(false);
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+  }, [activeTab]);
+
   useEffect(() => {
     return () => {
       if (audioManagerRef.current) {
@@ -559,6 +573,9 @@ export default function App() {
       }
       if (scenarioPlayerRef.current) {
         scenarioPlayerRef.current.stop();
+      }
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
       }
     };
   }, []);

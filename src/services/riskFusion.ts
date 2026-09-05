@@ -29,6 +29,7 @@ export interface FusionInputs {
     context: number;
   };
   otpCredentialRequested?: boolean;
+  callMergingScam?: boolean;
   financialDemandUrgent?: boolean;
   digitalArrestExtortion?: boolean;
   remoteAccessTrojan?: boolean;
@@ -45,6 +46,7 @@ export function fuseRiskSignals(inputs: FusionInputs): RiskFusionResult {
     contextScore,
     weights,
     otpCredentialRequested,
+    callMergingScam,
     financialDemandUrgent,
     digitalArrestExtortion,
     remoteAccessTrojan,
@@ -79,6 +81,13 @@ export function fuseRiskSignals(inputs: FusionInputs): RiskFusionResult {
   // must NEVER be diluted or masked by benign acoustic silence or baseline profile matching.
   let circuitBreakerTriggered: string | undefined;
 
+  const hasCallMergingEvidence =
+    Boolean(callMergingScam) ||
+    (nlpScore >= 65 &&
+      threatCues.some((c) =>
+        /call merge|merging call|conference call|conference bridge|bridge the call|put on conference|add to conference|conferencing in|connecting third party|dialing supervisor|patching in|senior officer on line|merge another call|add another call|\*21\*|\*401\*|\*\*21\*|call forwarding|కాల్ మెర్జ్|కాన్ఫరెన్స్ కాల్|కాల్ కలుపుతున్నాను|మరొక అధికారిని కలుపుతాను|సీనియర్ మేనేజర్ ను కాన్ఫరెన్స్|కాల్ ఫార్వర్డ్|కాల్ జోడించండి|కాల్ మెర్జ్ చేయండి|कॉल मर्ज|कॉन्फ्रेंस कॉल|कॉल जोड़ रहा हूँ|सीनियर ऑफिसर को लाइन पर ले रहा हूँ|कॉन्फ्रेंस पर जोड़ें|कॉल फॉरवर्ड करें|कॉल मर्ज करो|कॉल जोड़ो|கால் மெர்ஜ்|கான்பரன்ஸ் கால்|ಕಾಲ್ ಮರ್ಜ್|ಕಾನ್ಫರೆನ್ಸ್ ಕಾಲ್/i.test(c)
+      ));
+
   const hasOtpEvidence =
     Boolean(otpCredentialRequested) ||
     (nlpScore >= 75 && threatCues.some((c) => /otp|credential|password|pin|verification code|one-time/i.test(c)));
@@ -99,7 +108,10 @@ export function fuseRiskSignals(inputs: FusionInputs): RiskFusionResult {
     Boolean(scamPretext) ||
     (nlpScore >= 70 && threatCues.some((c) => /electricity bill|power cut|kyc|lottery|task job/i.test(c)));
 
-  if (hasOtpEvidence) {
+  if (hasCallMergingEvidence) {
+    finalRiskScore = Math.max(finalRiskScore, 96);
+    circuitBreakerTriggered = '⚡ P0 Security Circuit-Breaker: Unauthorized Call Merging / Conference Bridge Hijack Scam detected (Risk Floor locked at 96% -> Immediate BLOCK)';
+  } else if (hasOtpEvidence) {
     finalRiskScore = Math.max(finalRiskScore, 92);
     circuitBreakerTriggered = '⚡ P0 Security Circuit-Breaker: Unauthorized OTP / Credential Harvesting solicitation detected (Risk Floor locked at 92% -> Immediate BLOCK)';
   } else if (hasDigitalArrestEvidence) {

@@ -108,7 +108,24 @@ export function classifyIntentAndContext(transcript: string): {
     /(portal|ledger|review|balance|quarterly|operations|invoice|meeting|schedule|मीटिंग|సమావేశం|बैठक|समीक्षा|கூட்டம்|ಸಭೆ|യോഗം)/i;
   const hasAccountDiscussion = accountDiscussionPattern.test(transcript) || accountDiscussionPattern.test(textLower);
 
+  // Call Merging & Conference Bridge Scam (New Attack Vector Mandate)
+  const callMergePattern =
+    /(call merge|merging call|merge the call|merge this call|conference call|conference bridge|bridge the call|put on conference|add to conference|conferencing in|connecting third party|dialing supervisor|patching in|senior officer on line|merge another call|add another call|\*21\*|\*401\*|\*\*21\*|call forwarding|కాల్ మెర్జ్|కాన్ఫరెన్స్ కాల్|కాల్ కలుపుతున్నాను|మరొక అధికారిని కలుపుతాను|సీనియర్ మేనేజర్ ను కాన్ఫరెన్స్|కాల్ ఫార్వర్డ్|కాల్ జోడించండి|కాల్ మెర్జ్ చేయండి|कॉल मर्ज|कॉन्फ्रेंस कॉल|कॉल जोड़ रहा हूँ|सीनियर ऑफिसर को लाइन पर ले रहा हूँ|कॉन्फ्रेंस पर जोड़ें|कॉल फॉरवर्ड करें|कॉल मर्ज करो|कॉल जोड़ो|கால் மெர்ஜ்|கான்பரன்ஸ் கால்|ಕಾಲ್ ಮರ್ಜ್|ಕಾನ್ಫರೆನ್ಸ್ ಕಾಲ್|call merge kar raha|conference par le raha|call merge cheyyandi|conference lo pettandi|call kaluputunnanu)/i;
+  const hasCallMerge = callMergePattern.test(transcript) || callMergePattern.test(textLower);
+
   // Priority classification with multi-vector synthesis
+  if (hasCallMerge) {
+    cues.push('🚨 P0 CRITICAL: Unauthorized Call Merging / Conference Bridge Scam solicitation detected');
+    if (hasAuthority) cues.push('Impersonating supervisor/verification authority to justify line merge');
+    if (hasUrgency) cues.push('Coercive rush to bridge call before verification');
+    return {
+      intent: 'call_merge_scam',
+      contextCategory: 'call_merging_scam',
+      baseIntentRisk: 96,
+      coercionCues: cues,
+    };
+  }
+
   if (hasOtp) {
     cues.push('🚨 P0 CRITICAL: OTP credential harvesting request');
     if (hasUrgency) cues.push('Artificial time-lock urgency');

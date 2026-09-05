@@ -24,7 +24,12 @@ import {
   Zap,
   BellRing,
   Send,
-  Check
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  Search,
+  Filter
 } from 'lucide-react';
 import { AudioStreamManager } from '../utils/audioProcessor';
 import { AudioFeatures, TenantConfig, LiveSessionRecord, LiveCaptionRecord, AnalysisResultRecord, SessionContext } from '../types';
@@ -193,15 +198,65 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
   const [customTurnInput, setCustomTurnInput] = useState('');
   const [isNeuralTranscribing, setIsNeuralTranscribing] = useState(false);
 
+  // Interactive Middle Section (Captions & Turn Inspector) State
+  const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
+  const [turnSearchQuery, setTurnSearchQuery] = useState('');
+  const [turnFilter, setTurnFilter] = useState<'all' | 'block' | 'mfa' | 'allow'>('all');
+  const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null);
+  const [playingTurnId, setPlayingTurnId] = useState<string | null>(null);
+
+  const handlePlayTurnAudio = (id: string, text: string, lang: string) => {
+    setPlayingTurnId(id);
+    speakPresetUtterance(text, lang);
+    setTimeout(() => {
+      setPlayingTurnId((curr) => (curr === id ? null : curr));
+    }, Math.max(1500, Math.min(6000, text.length * 75)));
+  };
+
+  const handleCopyTurnText = (id: string, text: string) => {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text);
+      setCopiedTurnId(id);
+      setTimeout(() => setCopiedTurnId(null), 2000);
+    }
+  };
+
+  // Autonomous In-Call Continuous Audio Capture & Processing State
+  const autoDivisionModeRef = useRef(true);
+  const isDivisionInFlightRef = useRef(false);
+  const lastCommittedTextRef = useRef('');
+  const lastCommittedTimeRef = useRef(0);
+  const isRecordingRef = useRef(false);
+  const isPausedRef = useRef(false);
+  const sessionIdRef = useRef('');
+
   // Audio Manager Reference
   const audioManagerRef = useRef<AudioStreamManager | null>(null);
   const sessionContextRef = useRef<SessionContext | null>(null);
   const timerRef = useRef<any>(null);
   const turnCounterRef = useRef(1);
   const sessionStartTimeRef = useRef<string>(new Date().toISOString());
+  const lastRecordedBlobRef = useRef<Blob | null>(null);
+
+  // Synthesize Spoken Audio for simulated incoming calls
+  const speakPresetUtterance = (text: string, lang: string) => {
+    try {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = lang || 'en-IN';
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        window.speechSynthesis.speak(utterance);
+      }
+    } catch {
+      // Non-critical audio synthesis failure
+    }
+  };
 
   // Available Recognition Languages
   const availableLanguages = [
+    { code: 'auto', label: '⚡ Dynamic Multi-Lingual (Auto-Detect)' },
     { code: 'te-IN', label: 'Telugu (తెలుగు)' },
     { code: 'hi-IN', label: 'Hindi (हिन्दी)' },
     { code: 'en-IN', label: 'English (India)' },
@@ -213,6 +268,24 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
 
   // Quick Preset Phrases for realistic multi-lingual demonstration
   const quickTestPhrases = [
+    {
+      title: '🚨 Call Merging Scam (English - Conference Bridge)',
+      text: 'Sir I am merging the call with our senior banking fraud investigator and cyber inspector on a conference bridge right now, do not disconnect, merge this call immediately.',
+      lang: 'en-IN',
+      threatTag: 'CALL_MERGING_SCAM',
+    },
+    {
+      title: '🚨 Call Merging Scam (Telugu - కాల్ మెర్జ్ స్కామ్)',
+      text: 'సార్, నేను ఇప్పుడు మా సీనియర్ వెరిఫికేషన్ మేనేజర్ తో కాల్ మెర్జ్ చేస్తున్నాను, లైన్ లోనే ఉండండి, కాన్ఫరెన్స్ కాల్ లో మీ రహస్య కోడ్ చెప్పండి.',
+      lang: 'te-IN',
+      threatTag: 'CALL_MERGING_SCAM',
+    },
+    {
+      title: '🚨 Call Merging Scam (Hindi - कॉल मर्ज फ्रॉड)',
+      text: 'सर मैं अभी सीनियर इंस्पेक्टर को कॉन्फ्रेंस कॉल पर जोड़ रहा हूँ, आप तुरंत कॉल मर्ज करो और लाइन मत काटना।',
+      lang: 'hi-IN',
+      threatTag: 'CALL_MERGING_SCAM',
+    },
     {
       title: '🚨 Telugu Bank OTP Scam (తెలుగు)',
       text: 'నమస్కారం సార్, నేను మీ బ్యాంక్ మేనేజర్ మాట్లాడేది. మీ అకౌంట్ లో అనుమానాస్పద లావాదేవీ జరిగింది. ఖాతా బ్లాక్ కాకుండా ఉండాలంటే వెంటనే మీ మొబైల్ కు వచ్చిన ఓటీపీ చెప్పండి.',
@@ -282,6 +355,9 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
     return () => {
       if (audioManagerRef.current) {
         audioManagerRef.current.stop();
+      }
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
       }
     };
   }, []);
@@ -353,11 +429,16 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
     sessionContextRef.current = contextResult.sessionContext;
 
     // Real-time threat detection flags for P0 Zero-Trust Circuit Breakers
+    const isCallMerge = /(call merge|merging call|merge the call|merge this call|conference call|conference bridge|bridge the call|put on conference|add to conference|conferencing in|connecting third party|dialing supervisor|patching in|senior officer on line|merge another call|add another call|\*21\*|\*401\*|\*\*21\*|call forwarding|కాల్ మెర్జ్|కాన్ఫరెన్స్ కాల్|కాల్ కలుపుతున్నాను|మరొక అధికారిని కలుపుతాను|సీనియర్ మేనేజర్ ను కాన్ఫరెన్స్|కాల్ ఫార్వర్డ్|కాల్ జోడించండి|కాల్ మెర్జ్ చేయండి|कॉल मर्ज|कॉन्फ्रेंस कॉल|कॉल जोड़ रहा हूँ|सीनियर ऑफिसर को लाइन पर ले रहा हूँ|कॉन्फ्रेंस पर जोड़ें|कॉल फॉरवर्ड करें|कॉल मर्ज करो|कॉल जोड़ो|கால் மெர்ஜ்|கான்பரன்ஸ் கால்|ಕಾಲ್ ಮರ್ಜ್|ಕಾನ್ಫರೆನ್ಸ್ ಕಾಲ್)/i.test(text);
     const isOtp = /(otp|one-time|verification code|auth code|passcode|secret code|2fa|authenticator|ओटीपी|ఓటీపీ)/i.test(text);
     const isDigitalArrest = /(digital arrest|police|cbi|ed directorate|customs|cyber crime|crime branch|warrant|fir|jail|narcotics|parcel seized|illegal package|गिरफ्तारी|पुलिस|सीबीआई|పోలీస్|అరెస్ట్)/i.test(text);
     const isRemoteAccess = /(anydesk|teamviewer|rustdesk|quicksupport|apk|download app|screen share|install this app|स्क्रीन शेयर)/i.test(text);
     const isUrgentWire = /(transfer|wire|rtgs|neft|send money|pay now|beneficiary|vendor account|\blakh\b|\bcrore\b|\brupees\b|रुपये|पैसे)/i.test(text);
     const isScamPretext = /(electricity bill|power disconnected|power cut|kyc update|kyc expire|aadhaar link)/i.test(text);
+
+    if (isCallMerge) {
+      pushLiveIndication('danger', '🚨 Call Merging Scam Detected: Line hijack / conference bridge scam -> TRIGGERING P0 BLOCK');
+    }
 
     // 6. LAYER 5: Multi-Modal Risk Fusion & Circuit Breaker Engine
     const fusionResult = fuseRiskSignals({
@@ -367,6 +448,7 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
       nlpScore: Math.max(heuristics.socialEngineeringRisk, contextResult.riskScore),
       contextScore: contextResult.riskScore,
       weights: effectiveWeights,
+      callMergingScam: isCallMerge,
       otpCredentialRequested: isOtp,
       digitalArrestExtortion: isDigitalArrest,
       financialDemandUrgent: isUrgentWire,
@@ -478,11 +560,138 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
     return analysisRecord;
   };
 
+  // Automated In-Call Audio Division Engine: Transcribes and evaluates each spoken audio division automatically
+  const handleAutoProcessDivisionChunk = async (
+    blob: Blob,
+    base64Url: string,
+    dur: number,
+    activeSessionId: string
+  ) => {
+    if (!autoDivisionModeRef.current || !isRecordingRef.current || isPausedRef.current) return;
+    if (isDivisionInFlightRef.current) return;
+    if (!base64Url || base64Url.length < 400) return;
+
+    // If Web Speech API is natively supported and active, avoid burning Gemini API quota on background chunks
+    if (typeof window !== 'undefined' && ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+      return;
+    }
+
+    try {
+      isDivisionInFlightRef.current = true;
+      const startMs = performance.now();
+      const currentTurnTarget = turnCounterRef.current;
+
+      const res = await fetch('/api/transcribe-audio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audio: base64Url,
+          mimeType: blob.type || 'audio/webm',
+          languageHint: activeLang === 'auto' ? 'en' : activeLang.substring(0, 2),
+          sessionId: activeSessionId,
+          turnNumber: currentTurnTarget,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.quotaExceeded) {
+          // Pause automatic background cloud ASR division requests
+          autoDivisionModeRef.current = false;
+          return;
+        }
+
+        if (data.isSpeechDetected && data.transcript && data.transcript.trim()) {
+          const rawTranscript = data.transcript.trim();
+          const normalized = rawTranscript.toLowerCase();
+
+          // Deduplicate against transcript committed within 2.8s by SpeechRecognition
+          const timeSinceCommit = Date.now() - lastCommittedTimeRef.current;
+          const isDuplicate = timeSinceCommit < 2800 && (
+            lastCommittedTextRef.current === normalized ||
+            lastCommittedTextRef.current.includes(normalized) ||
+            normalized.includes(lastCommittedTextRef.current)
+          );
+
+          if (!isDuplicate) {
+            lastCommittedTextRef.current = normalized;
+            lastCommittedTimeRef.current = Date.now();
+
+            const currentTurn = turnCounterRef.current++;
+            const turnId = `cap-${activeSessionId}-${currentTurn}`;
+            const timestamp = new Date().toISOString();
+            const detectedLang = data.detectedLanguage || activeLang.substring(0, 2);
+
+            // Dynamic captions append
+            setCaptions((prev) => [
+              ...prev,
+              {
+                id: turnId,
+                text: rawTranscript,
+                isFinal: true,
+                timestamp,
+                turnNumber: currentTurn,
+                language: detectedLang,
+              },
+            ]);
+
+            // Save caption to DB
+            fetch(`/api/live-sessions/${activeSessionId}/captions`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                turn_number: currentTurn,
+                transcript: rawTranscript,
+                detected_language: detectedLang,
+                caption_status: 'final',
+              }),
+            }).catch((e) => console.warn('Division caption save error:', e));
+
+            // Acoustic features for this division
+            const dynamicFeatures: AudioFeatures = {
+              ...lastFeaturesRef.current,
+              rms: Math.max(0.2, lastFeaturesRef.current.rms),
+              pitchVariance: Math.max(0.38, lastFeaturesRef.current.pitchVariance),
+              spectralCentroid: Math.max(2500, lastFeaturesRef.current.spectralCentroid),
+              zeroCrossingRate: Math.max(0.3, lastFeaturesRef.current.zeroCrossingRate),
+            };
+
+            // DYNAMIC 5-LAYER EVALUATION & REAL-TIME INTIMATION
+            const analysis = evaluateAndApplyTurnFiveLayers(
+              rawTranscript,
+              currentTurn,
+              activeSessionId,
+              dynamicFeatures,
+              detectedLang
+            );
+
+            const latency = Math.round(performance.now() - startMs);
+
+            pushLiveIndication(
+              analysis.decision === 'BLOCK' ? 'danger' : analysis.decision === 'PAUSE_ESCALATE' ? 'warning' : 'info',
+              `⚡ Audio Auto-Evaluated: "${rawTranscript.substring(0, 32)}..." [${latency}ms]`
+            );
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Auto division processing error:', e);
+    } finally {
+      isDivisionInFlightRef.current = false;
+    }
+  };
+
   // Start Live Microphone
   const handleStartRecording = async () => {
     try {
+      // Immediately cancel any ongoing speech synthesis or audio playback
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+
       const newSessionId = `CALL-LIVE-${Date.now().toString(36).toUpperCase()}`;
       setSessionId(newSessionId);
+      sessionIdRef.current = newSessionId;
       sessionStartTimeRef.current = new Date().toISOString();
       sessionContextRef.current = null;
       setDurationSec(0);
@@ -495,6 +704,8 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
       setIsAddedToEvaluation(false);
       setLiveFraudIntimation(null);
       turnCounterRef.current = 1;
+      isRecordingRef.current = true;
+      isPausedRef.current = false;
 
       // Register live session in DB / Backend immediately
       fetch('/api/live-sessions', {
@@ -523,6 +734,9 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
 
           // Interim real-time heuristics while talking
           const heuristics = evaluateTextHeuristics(text);
+          if (/(call merge|merging call|merge the call|merge this call|conference call|conference bridge|bridge the call|put on conference|add to conference|conferencing in|connecting third party|dialing supervisor|patching in|senior officer on line|merge another call|add another call|\*21\*|\*401\*|\*\*21\*|call forwarding|కాల్ మెర్జ్|కాన్ఫరెన్స్ కాల్|కాల్ కలుపుతున్నాను|మరొక అధికారిని కలుపుతాను|సీనియర్ మేనేజర్ ను కాన్ఫరెన్స్|కాల్ ఫార్వర్డ్|కాల్ జోడించండి|कॉल मर्ज|कॉन्फ्रेंस कॉल|कॉल जोड़ रहा हूँ|सीनियर ऑफिसर को लाइन पर ले रहा हूँ)/i.test(text)) {
+            pushLiveIndication('danger', '🚨 Call Merging Scam: Line merge / conference bridge hijack detected');
+          }
           if (heuristics.urgencyScore > 50) {
             pushLiveIndication('warning', '⚠️ Urgency Coercion: Immediate delivery/urgency demand');
           }
@@ -537,6 +751,8 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
             setCurrentInterimText(text);
           } else {
             setCurrentInterimText('');
+            lastCommittedTextRef.current = text.trim().toLowerCase();
+            lastCommittedTimeRef.current = Date.now();
             const currentTurn = turnCounterRef.current++;
             const turnId = `cap-${newSessionId}-${currentTurn}`;
             const timestamp = new Date().toISOString();
@@ -582,8 +798,19 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
         onError: (err: string) => {
           setNotification({ type: 'error', message: `Microphone Error: ${err}` });
           setIsRecording(false);
+          isRecordingRef.current = false;
         },
-        onAudioChunkReady: async (_blob: Blob, base64Url: string, dur: number) => {
+        onLanguageDetected: (detectedLang: string) => {
+          const match = availableLanguages.find((l) => l.code.startsWith(detectedLang));
+          if (match && activeLang === 'auto') {
+            pushLiveIndication('info', `🌐 Vernacular Dialect Auto-Accepted: ${match.label}`);
+          }
+        },
+        onAudioChunkReady: async (blob: Blob, base64Url: string, dur: number) => {
+          lastRecordedBlobRef.current = blob;
+          if (base64Url) {
+            setRecordedAudioUrl(base64Url);
+          }
           setAudioChunksCount((prev) => {
             const nextCount = prev + 1;
             // Post audio chunk record to DB
@@ -600,6 +827,9 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
             }).catch((e) => console.warn('Chunk save warn:', e));
             return nextCount;
           });
+
+          // AUTOMATIC REAL-TIME IN-CALL CONVERSATION DIVISION PROCESSING
+          handleAutoProcessDivisionChunk(blob, base64Url, dur, newSessionId);
         },
       });
 
@@ -608,7 +838,9 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
       if (ok) {
         audioManagerRef.current = manager;
         setIsRecording(true);
+        isRecordingRef.current = true;
         setIsPaused(false);
+        isPausedRef.current = false;
         setNotification({ type: 'info', message: 'Live Microphone active. Speak clearly into the microphone.' });
       }
     } catch (err: any) {
@@ -622,17 +854,26 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
     if (isPaused) {
       audioManagerRef.current.resumeMicrophone();
       setIsPaused(false);
+      isPausedRef.current = false;
       setNotification({ type: 'info', message: 'Microphone resumed.' });
     } else {
       audioManagerRef.current.pauseMicrophone();
       setIsPaused(true);
+      isPausedRef.current = true;
       setNotification({ type: 'info', message: 'Microphone paused.' });
     }
   };
 
   // Stop & Finalize Session
   const handleStopRecording = async () => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+
     if (!audioManagerRef.current && !isRecording) return;
+
+    isRecordingRef.current = false;
+    isPausedRef.current = false;
 
     if (audioManagerRef.current) {
       const audioUrl = await audioManagerRef.current.getRecordedAudioDataUrl();
@@ -754,6 +995,12 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
       },
     ]);
 
+    // Speak utterance through Web Speech Synthesis only if microphone is NOT actively recording,
+    // to prevent speaker sound leaking into the microphone and triggering false detections.
+    if (!isRecordingRef.current) {
+      speakPresetUtterance(preset.text, preset.lang);
+    }
+
     // Save caption
     fetch(`/api/live-sessions/${sessionId}/captions`, {
       method: 'POST',
@@ -799,6 +1046,10 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
     const turnId = `cap-${sessionId}-${currentTurn}`;
     const timestamp = new Date().toISOString();
     const langCode = activeLang.substring(0, 2);
+
+    if (!isRecordingRef.current) {
+      speakPresetUtterance(textToEvaluate, activeLang);
+    }
 
     setCaptions((prev) => [
       ...prev,
@@ -1407,19 +1658,6 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
             </div>
           </div>
         </div>
-
-        {/* Live Audio Playback (if recorded) */}
-        {recordedAudioUrl && (
-          <div className="p-4 bg-amber-50/60 border-b border-amber-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
-            <div className="flex items-center space-x-2 text-amber-900">
-              <Volume2 className="w-4 h-4 text-amber-700" />
-              <span>
-                <strong>Session Audio Captured ({formatTime(durationSec)}):</strong> Listen back to the raw microphone stream.
-              </span>
-            </div>
-            <audio controls src={recordedAudioUrl} className="h-8 max-w-xs" />
-          </div>
-        )}
       </div>
 
       {/* Split View: Live Captions Stream vs Real-Time Security Intelligence */}
@@ -1427,11 +1665,17 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
         {/* Left Column: Live Captions & Transcription Feed (7 cols) */}
         <div className="lg:col-span-7 space-y-4">
           <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-5">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+            {/* Header with Title and Live Status */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 gap-2 mb-3">
               <div className="flex items-center space-x-2">
                 <Radio className={`w-4 h-4 ${isRecording ? 'text-rose-500 animate-pulse' : 'text-slate-400'}`} />
                 <h3 className="text-sm font-bold text-slate-900">Live Captions Stream</h3>
-                <span className="text-[11px] font-mono text-slate-500">({captions.length} turns recorded)</span>
+                <span className="text-[11px] font-mono text-slate-500">
+                  ({captions.length} {captions.length === 1 ? 'turn' : 'turns'} recorded)
+                </span>
+                <span className="text-[10px] text-indigo-600 bg-indigo-50 font-medium px-2 py-0.5 rounded-full border border-indigo-200/80">
+                  Tap any turn to inspect
+                </span>
               </div>
 
               {isRecording && (
@@ -1442,66 +1686,296 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
               )}
             </div>
 
-            {/* Transcription History Container */}
-            <div className="space-y-3 min-h-[300px] max-h-[480px] overflow-y-auto pr-1">
+            {/* Interactive Filter & Search Bar in Middle */}
+            <div className="space-y-2 mb-3 pb-3 border-b border-slate-100">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
+                {/* Search input */}
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={turnSearchQuery}
+                    onChange={(e) => setTurnSearchQuery(e.target.value)}
+                    placeholder="Search spoken keywords or threat tags..."
+                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:bg-white transition"
+                  />
+                  {turnSearchQuery && (
+                    <button
+                      onClick={() => setTurnSearchQuery('')}
+                      className="text-[10px] text-slate-400 hover:text-slate-600 absolute right-2 top-1/2 -translate-y-1/2 font-mono"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {/* Filter Pills */}
+                <div className="flex items-center gap-1 overflow-x-auto text-[11px] font-medium shrink-0">
+                  <button
+                    onClick={() => setTurnFilter('all')}
+                    className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+                      turnFilter === 'all'
+                        ? 'bg-slate-900 text-white font-bold'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    All ({captions.length})
+                  </button>
+                  <button
+                    onClick={() => setTurnFilter('block')}
+                    className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+                      turnFilter === 'block'
+                        ? 'bg-rose-600 text-white font-bold shadow-2xs'
+                        : 'bg-rose-50 text-rose-700 hover:bg-rose-100'
+                    }`}
+                  >
+                    Blocked ({analysisTurns.filter((t) => t.decision === 'BLOCK').length})
+                  </button>
+                  <button
+                    onClick={() => setTurnFilter('mfa')}
+                    className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+                      turnFilter === 'mfa'
+                        ? 'bg-amber-600 text-white font-bold shadow-2xs'
+                        : 'bg-amber-50 text-amber-800 hover:bg-amber-100'
+                    }`}
+                  >
+                    Step-Up ({analysisTurns.filter((t) => t.decision === 'STEP_UP_MFA' || t.decision === 'PAUSE_ESCALATE').length})
+                  </button>
+                  <button
+                    onClick={() => setTurnFilter('allow')}
+                    className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+                      turnFilter === 'allow'
+                        ? 'bg-emerald-600 text-white font-bold shadow-2xs'
+                        : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                    }`}
+                  >
+                    Safe ({analysisTurns.filter((t) => t.decision === 'ALLOW').length})
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Transcription History Container with Interactive Turn Cards */}
+            <div className="space-y-3 min-h-[280px] max-h-[460px] overflow-y-auto pr-1">
               {captions.length === 0 && !currentInterimText && (
-                <div className="flex flex-col items-center justify-center py-16 text-center text-slate-400 space-y-2">
+                <div className="flex flex-col items-center justify-center py-14 text-center text-slate-400 space-y-2">
                   <Mic className="w-8 h-8 text-slate-300" />
                   <p className="text-xs">
-                    No speech recorded yet. Click <strong className="text-slate-600">Start Live Microphone</strong> or click a test phrase above.
+                    No speech recorded yet. Speak into the microphone or test a phrase below.
                   </p>
                 </div>
               )}
 
-              {captions.map((cap, idx) => {
-                const turnAnalysis = analysisTurns[idx];
-                return (
-                  <div
-                    key={cap.id}
-                    className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/60 hover:bg-slate-50 transition"
-                  >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <div className="flex items-center space-x-2">
-                        <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-mono text-[10px] font-bold">
-                          Turn #{cap.turnNumber}
-                        </span>
-                        <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-mono text-[10px] uppercase font-semibold">
-                          {cap.language}
-                        </span>
-                        <span className="text-[11px] text-slate-400 font-mono">
-                          {new Date(cap.timestamp).toLocaleTimeString()}
-                        </span>
-                      </div>
+              {captions
+                .map((cap, idx) => ({ cap, idx, turnAnalysis: analysisTurns[idx] }))
+                .filter(({ cap, turnAnalysis }) => {
+                  if (turnFilter === 'block' && turnAnalysis?.decision !== 'BLOCK') return false;
+                  if (turnFilter === 'mfa' && turnAnalysis?.decision !== 'STEP_UP_MFA' && turnAnalysis?.decision !== 'PAUSE_ESCALATE') return false;
+                  if (turnFilter === 'allow' && turnAnalysis?.decision !== 'ALLOW') return false;
+                  if (turnSearchQuery.trim()) {
+                    const q = turnSearchQuery.toLowerCase();
+                    const textMatch = cap.text.toLowerCase().includes(q);
+                    const intentMatch = turnAnalysis?.context?.toLowerCase().includes(q);
+                    const decisionMatch = turnAnalysis?.decision?.toLowerCase().includes(q);
+                    return textMatch || intentMatch || decisionMatch;
+                  }
+                  return true;
+                })
+                .map(({ cap, idx, turnAnalysis }) => {
+                  const isSelected = selectedTurnId === cap.id;
+                  const isPlaying = playingTurnId === cap.id;
+                  const isCopied = copiedTurnId === cap.id;
 
-                      {turnAnalysis && (
+                  return (
+                    <div
+                      key={cap.id}
+                      onClick={() => setSelectedTurnId((curr) => (curr === cap.id ? null : cap.id))}
+                      className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
+                        isSelected
+                          ? 'border-indigo-400 bg-white ring-2 ring-indigo-500/80 shadow-md'
+                          : 'border-slate-200 bg-slate-50/70 hover:bg-slate-50 hover:border-slate-300'
+                      }`}
+                    >
+                      {/* Top Header Row of Turn */}
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center space-x-2">
+                          <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-mono text-[10px] font-bold">
+                            Turn #{cap.turnNumber}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-mono text-[10px] uppercase font-semibold">
+                            {cap.language}
+                          </span>
+                          <span className="text-[11px] text-slate-400 font-mono">
+                            {new Date(cap.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+
                         <div className="flex items-center gap-1.5">
-                          {turnAnalysis.context_switch && (
+                          {turnAnalysis?.context_switch && (
                             <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300 text-[10px] font-semibold flex items-center gap-1">
                               <AlertTriangle className="w-3 h-3" />
                               Context Switch
                             </span>
                           )}
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${
-                              turnAnalysis.decision === 'ALLOW'
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : turnAnalysis.decision === 'STEP_UP_MFA'
-                                ? 'bg-amber-100 text-amber-800'
-                                : 'bg-rose-100 text-rose-800'
-                            }`}
-                          >
-                            Risk: {turnAnalysis.risk_score} • {turnAnalysis.decision}
-                          </span>
+                          {turnAnalysis && (
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${
+                                turnAnalysis.decision === 'ALLOW'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : turnAnalysis.decision === 'STEP_UP_MFA' || turnAnalysis.decision === 'PAUSE_ESCALATE'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-rose-100 text-rose-800'
+                              }`}
+                            >
+                              Risk: {turnAnalysis.risk_score} • {turnAnalysis.decision}
+                            </span>
+                          )}
+                          <div className="p-1 text-slate-400 hover:text-slate-600 rounded">
+                            {isSelected ? (
+                              <ChevronUp className="w-3.5 h-3.5 text-indigo-600" />
+                            ) : (
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Spoken Text */}
+                      <p className="text-xs sm:text-sm text-slate-800 font-medium leading-relaxed">
+                        "{cap.text}"
+                      </p>
+
+                      {/* Interactive Expanded Inspection Panel */}
+                      {isSelected && (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          className="mt-3 pt-3 border-t border-indigo-100 space-y-3 text-xs bg-indigo-50/40 -mx-3.5 -mb-3.5 p-3.5 rounded-b-xl"
+                        >
+                          {/* Interactive Action Toolbar for this Turn */}
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => handlePlayTurnAudio(cap.id, cap.text, cap.language)}
+                                className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-2xs ${
+                                  isPlaying
+                                    ? 'bg-indigo-600 text-white animate-pulse'
+                                    : 'bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200'
+                                }`}
+                                title="Synthesize and play audio for this turn"
+                              >
+                                <Volume2 className="w-3.5 h-3.5" />
+                                <span>{isPlaying ? 'Playing Spoken Audio...' : 'Play Utterance (Voice)'}</span>
+                              </button>
+
+                              <button
+                                onClick={() => handleCopyTurnText(cap.id, cap.text)}
+                                className="px-2.5 py-1 rounded-md bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-[11px] font-medium transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                                title="Copy transcript text"
+                              >
+                                {isCopied ? (
+                                  <>
+                                    <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                    <span className="text-emerald-700 font-semibold">Copied!</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3.5 h-3.5 text-slate-500" />
+                                    <span>Copy Text</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+
+                            <span className="text-[10px] text-indigo-800 font-mono font-bold bg-indigo-100 px-2 py-0.5 rounded">
+                              Layer Breakdown for Turn #{cap.turnNumber}
+                            </span>
+                          </div>
+
+                          {/* 5-Layer Deep Diagnostic Grid for this specific turn */}
+                          {turnAnalysis ? (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 pt-1 font-mono text-[11px]">
+                              {/* Layer 1: Acoustic */}
+                              <div className="p-2 rounded-lg bg-white border border-slate-200 space-y-0.5">
+                                <div className="text-[10px] text-slate-500 font-bold uppercase flex items-center gap-1">
+                                  <span className="px-1 rounded bg-slate-100 text-slate-700">L1</span> Acoustic DSP
+                                </div>
+                                <div className="font-bold text-slate-800">
+                                  Deepfake: {turnAnalysis.deepfake_score}%
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  Glottal Pulse: {turnAnalysis.deepfake_score > 50 ? 'Anomalous' : 'Human Nominal'}
+                                </div>
+                              </div>
+
+                              {/* Layer 2: Zero-Trust Policy */}
+                              <div className="p-2 rounded-lg bg-white border border-slate-200 space-y-0.5">
+                                <div className="text-[10px] text-slate-500 font-bold uppercase flex items-center gap-1">
+                                  <span className="px-1 rounded bg-slate-100 text-slate-700">L2</span> Policy & Sector
+                                </div>
+                                <div className="font-bold text-slate-800 capitalize truncate">
+                                  Sector: {detectedSector?.name?.split(' ')[0] || 'Banking'}
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  Zero-Trust Floor: 35% Strict
+                                </div>
+                              </div>
+
+                              {/* Layer 3: Biometric Identity */}
+                              <div className="p-2 rounded-lg bg-white border border-slate-200 space-y-0.5">
+                                <div className="text-[10px] text-slate-500 font-bold uppercase flex items-center gap-1">
+                                  <span className="px-1 rounded bg-slate-100 text-slate-700">L3</span> Biometrics
+                                </div>
+                                <div className="font-bold text-slate-800">
+                                  Speaker Match: {turnAnalysis.speaker_similarity}%
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  Identity: {turnAnalysis.speaker_similarity < 60 ? 'Unverified / Drift' : 'Consistent'}
+                                </div>
+                              </div>
+
+                              {/* Layer 4: Contextual NLP */}
+                              <div className="p-2 rounded-lg bg-white border border-slate-200 space-y-0.5 sm:col-span-2">
+                                <div className="text-[10px] text-slate-500 font-bold uppercase flex items-center gap-1">
+                                  <span className="px-1 rounded bg-slate-100 text-slate-700">L4</span> Intent & Cues
+                                </div>
+                                <div className="font-bold text-slate-800 capitalize">
+                                  Detected: {turnAnalysis.context.replace(/_/g, ' ')}
+                                </div>
+                                <div className="flex flex-wrap gap-1 mt-1">
+                                  {turnAnalysis.context_switch && (
+                                    <span className="px-1 py-0.2 bg-amber-50 text-amber-700 border border-amber-200 rounded text-[10px]">
+                                      Sudden Context Shift
+                                    </span>
+                                  )}
+                                  <span className="px-1 py-0.2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded text-[10px]">
+                                    {cap.language.toUpperCase()} Dialect
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Layer 5: Fusion Decision */}
+                              <div className="p-2 rounded-lg bg-slate-900 text-white space-y-0.5">
+                                <div className="text-[10px] text-indigo-300 font-bold uppercase flex items-center gap-1">
+                                  <span className="px-1 rounded bg-indigo-950 text-indigo-300">L5</span> Multi-Modal Fusion
+                                </div>
+                                <div className="text-xs font-black text-amber-300">
+                                  Decision: {turnAnalysis.decision}
+                                </div>
+                                <div className="text-[10px] text-slate-300">
+                                  Fused Risk: {turnAnalysis.risk_score}/100
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-[11px] text-slate-500 italic">
+                              Live turn registered; acoustic and intent telemetry synced.
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
-
-                    <p className="text-xs sm:text-sm text-slate-800 font-medium leading-relaxed">
-                      "{cap.text}"
-                    </p>
-                  </div>
-                );
-              })}
+                  );
+                })}
 
               {/* Streaming Interim text */}
               {currentInterimText && (
@@ -1518,8 +1992,59 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
               )}
             </div>
 
+            {/* Interactive Custom Utterance Prompt in the Middle */}
+            <div className="mt-3 pt-3 border-t border-slate-100">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={customTurnInput}
+                  onChange={(e) => setCustomTurnInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleInjectCustomTurn()}
+                  placeholder="Test spoken phrase in middle (e.g., 'Merge call with cyber cell' or 'నా ఆధార్ బ్లాక్ అయిందా?')..."
+                  className="flex-1 px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:bg-white transition"
+                />
+                <button
+                  onClick={() => handleInjectCustomTurn()}
+                  disabled={!customTurnInput.trim()}
+                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shrink-0 shadow-2xs"
+                >
+                  <Send className="w-3 h-3" />
+                  <span>Send & Evaluate</span>
+                </button>
+              </div>
+
+              {/* Quick shortcut chips to test in the middle */}
+              <div className="flex flex-wrap items-center gap-1.5 pt-2 text-[10px]">
+                <span className="text-slate-400 font-medium">Quick Test:</span>
+                <button
+                  onClick={() => handleInjectCustomTurn('Sir please merge this call with our cyber cell conference bridge right now.')}
+                  className="px-2 py-0.5 rounded bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 text-slate-600 transition cursor-pointer border border-slate-200"
+                >
+                  + Conference Merge (En)
+                </button>
+                <button
+                  onClick={() => handleInjectCustomTurn('వెంటనే మీ బ్యాంక్ ఖాతాకు వచ్చిన 6 అంకెల OTP ని నాకు చెప్పండి.')}
+                  className="px-2 py-0.5 rounded bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 text-slate-600 transition cursor-pointer border border-slate-200"
+                >
+                  + ఓటీపీ కోత (Te)
+                </button>
+                <button
+                  onClick={() => handleInjectCustomTurn('पुलिस नोटिस जारी हुआ है, अभी अपना पूरा फंड एस्क्रो अकाउंट में ट्रांसफर करें।')}
+                  className="px-2 py-0.5 rounded bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 text-slate-600 transition cursor-pointer border border-slate-200"
+                >
+                  + पुलिस वारंट (Hi)
+                </button>
+                <button
+                  onClick={() => handleInjectCustomTurn('Hello, I would like to check my account balance and schedule an appointment.')}
+                  className="px-2 py-0.5 rounded bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-600 transition cursor-pointer border border-slate-200"
+                >
+                  + Safe Inquiry
+                </button>
+              </div>
+            </div>
+
             {/* Bottom Actions */}
-            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
               <div className="text-slate-500 font-mono text-[11px]">
                 Active Tenant: <strong className="text-slate-800">{currentTenant.name}</strong>
               </div>

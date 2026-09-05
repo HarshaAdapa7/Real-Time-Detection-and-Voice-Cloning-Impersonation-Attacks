@@ -176,6 +176,22 @@ export const MULTILINGUAL_TEST_CASES: TestCaseSchema[] = [
     expected_decision: 'PAUSE_ESCALATE',
     sample_transcription: 'Keep this completely confidential and do not inform your manager or compliance officer until this transaction clears.',
   },
+  {
+    test_id: 'ML-EN-006',
+    category: 'multilingual',
+    language: 'English',
+    language_code: 'en',
+    scenario: 'call_merge_scam',
+    input_type: 'audio',
+    expected_language: 'en',
+    expected_transcription: 'Sir I am merging the call with our senior banking fraud investigator on a conference bridge right now, please stay on line and merge this call.',
+    expected_intent: 'call_merge_scam',
+    expected_security_category: 'Call Merging / Conference Hijack Scam',
+    expected_risk_level: 'CRITICAL',
+    expected_risk_range: [95, 100],
+    expected_decision: 'BLOCK',
+    sample_transcription: 'Sir I am merging the call with our senior banking fraud investigator on a conference bridge right now, please stay on line and merge this call.',
+  },
 
   // --- HINDI SUITE ---
   {
@@ -259,6 +275,22 @@ export const MULTILINGUAL_TEST_CASES: TestCaseSchema[] = [
     expected_decision: 'PAUSE_ESCALATE',
     sample_transcription: 'यह बहुत गोपनीय मामला है। इसके बारे में अपने शाखा प्रबंधक या किसी भी अन्य अधिकारी को बिल्कुल मत बताना।',
   },
+  {
+    test_id: 'ML-HI-006',
+    category: 'multilingual',
+    language: 'Hindi',
+    language_code: 'hi',
+    scenario: 'call_merge_scam',
+    input_type: 'audio',
+    expected_language: 'hi',
+    expected_transcription: 'सर मैं अभी सीनियर इंस्पेक्टर को कॉन्फ्रेंस कॉल पर जोड़ रहा हूँ, आप तुरंत कॉल मर्ज करो और लाइन मत काटना।',
+    expected_intent: 'call_merge_scam',
+    expected_security_category: 'Call Merging / Conference Hijack Scam',
+    expected_risk_level: 'CRITICAL',
+    expected_risk_range: [95, 100],
+    expected_decision: 'BLOCK',
+    sample_transcription: 'सर मैं अभी सीनियर इंस्पेक्टर को कॉन्फ्रेंस कॉल पर जोड़ रहा हूँ, आप तुरंत कॉल मर्ज करो और लाइन मत काटना।',
+  },
 
   // --- TELUGU SUITE ---
   {
@@ -341,6 +373,22 @@ export const MULTILINGUAL_TEST_CASES: TestCaseSchema[] = [
     expected_risk_range: [60, 85],
     expected_decision: 'PAUSE_ESCALATE',
     sample_transcription: 'ఇది చాలా రహస్యమైన లావాదేవీ. ఈ విషయం గురించి మీ మేనేజర్‌కు లేదా ఎవరికీ కూడా అస్సలు చెప్పవద్దు.',
+  },
+  {
+    test_id: 'ML-TE-006',
+    category: 'multilingual',
+    language: 'Telugu',
+    language_code: 'te',
+    scenario: 'call_merge_scam',
+    input_type: 'audio',
+    expected_language: 'te',
+    expected_transcription: 'సార్, నేను ఇప్పుడు మా సీనియర్ వెరిఫికేషన్ మేనేజర్ తో కాల్ మెర్జ్ చేస్తున్నాను, లైన్ లోనే ఉండండి, కాన్ఫరెన్స్ కాల్ లో మీ రహస్య కోడ్ చెప్పండి.',
+    expected_intent: 'call_merge_scam',
+    expected_security_category: 'Call Merging / Conference Hijack Scam',
+    expected_risk_level: 'CRITICAL',
+    expected_risk_range: [95, 100],
+    expected_decision: 'BLOCK',
+    sample_transcription: 'సార్, నేను ఇప్పుడు మా సీనియర్ వెరిఫికేషన్ మేనేజర్ తో కాల్ మెర్జ్ చేస్తున్నాను, లైన్ లోనే ఉండండి, కాన్ఫరెన్స్ కాల్ లో మీ రహస్య కోడ్ చెప్పండి.',
   },
 
   // --- TAMIL SUITE ---

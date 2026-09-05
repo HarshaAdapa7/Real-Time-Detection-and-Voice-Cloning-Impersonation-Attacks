@@ -63,10 +63,18 @@ export function evaluateTextHeuristics(transcript: string): NlpSignalResult {
     /(it security|cfo|ceo|director|cyber cell|security department|bank manager|police inspector|enforcement officer|compliance officer|headquarters|सीईओ|सीएफओ|प्रबंधक|పోలీస్|మేనేజర్|అధికారి|இயக்குனர்|அதிகாரி|ಅಧಿಕಾರಿ)/i;
   const hasAuthority = authorityPattern.test(text) || authorityPattern.test(textLower);
 
+  // 7. Call Merging & Conference Bridge Hijack Scam (New Attack Vector Mandate)
+  const callMergePattern =
+    /(call merge|merging call|merge the call|merge this call|conference call|conference bridge|bridge the call|put on conference|add to conference|conferencing in|connecting third party|dialing supervisor|patching in|senior officer on line|merge another call|add another call|\*21\*|\*401\*|\*\*21\*|call forwarding|కాల్ మెర్జ్|కాన్ఫరెన్స్ కాల్|కాల్ కలుపుతున్నాను|మరొక అధికారిని కలుపుతాను|సీనియర్ మేనేజర్ ను కాన్ఫరెన్స్|కాల్ ఫార్వర్డ్|కాల్ జోడించండి|కాల్ మెర్జ్ చేయండి|कॉल मर्ज|कॉन्फ्रेंस कॉल|कॉल जोड़ रहा हूँ|सीनियर ऑफिसर को लाइन पर ले रहा हूँ|कॉन्फ्रेंस पर जोड़ें|कॉल फॉरवर्ड करें|कॉल मर्ज करो|कॉल जोड़ो|கால் மெர்ஜ்|கான்பரன்ஸ் கால்|ಕಾಲ್ ಮರ್ಜ್|ಕಾನ್ಫರೆನ್ಸ್ ಕಾಲ್|call merge kar raha|conference par le raha|call merge cheyyandi|conference lo pettandi|call kaluputunnanu)/i;
+  const hasCallMerge = callMergePattern.test(text) || callMergePattern.test(textLower);
+
   let score = 10;
   const cues: string[] = [];
 
-  if (hasOtp) {
+  if (hasCallMerge) {
+    score = 96;
+    cues.push("🚨 P0 CRITICAL: Unauthorized Call Merging / Conference Bridge Hijack Scam detected");
+  } else if (hasOtp) {
     score = 96;
     cues.push("🚨 P0 CRITICAL: Sensitive OTP / Passcode / 2FA Credential Solicitation detected");
   } else if (hasDigitalArrest) {
@@ -96,7 +104,9 @@ export function evaluateTextHeuristics(transcript: string): NlpSignalResult {
   }
 
   const coercionTone =
-    hasOtp || hasDigitalArrest
+    hasCallMerge
+      ? "Call Merging / Conference Hijack Fraud"
+      : hasOtp || hasDigitalArrest
       ? "Aggressive Extortion / Phishing"
       : hasUrgency && hasSecrecy
       ? "Coercive & Manipulative"
