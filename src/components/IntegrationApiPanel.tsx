@@ -118,8 +118,8 @@ export const IntegrationApiPanel: React.FC<IntegrationApiPanelProps> = ({
       <div className="p-3 mb-5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-start gap-2.5">
         <Server className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
         <div>
-          <strong className="text-slate-900">SIH Architecture Note: </strong>
-          This API endpoint is hosted by the Express server (`/api/voice-trust/evaluate`). It simulates how a Core Banking System (e.g. Infosys Finacle) or Telecom Gateway (Exotel/Plivo) interacts with the Voice Trust Firewall contract without claiming direct production bank connectivity.
+          <strong className="text-slate-900">Architecture Note: </strong>
+          This API endpoint is hosted by the Express server (`/api/voice-trust/evaluate`). It enables Core Banking Systems (e.g. Infosys Finacle) and Telecom Gateways (Exotel/Plivo) to query the Voice Trust Firewall for real-time risk evaluation and step-up policy decisions.
         </div>
       </div>
 

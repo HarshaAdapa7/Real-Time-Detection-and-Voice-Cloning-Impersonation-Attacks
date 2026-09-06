@@ -29,6 +29,8 @@ export class AudioStreamManager {
   private recognition: any = null;
   private isRunning = false;
   private isPaused = false;
+  private isRecognitionActive = false;
+  private isRestartingRecognition = false;
   private chunkIntervalTimer: any = null;
   private chunkCounter = 0;
   private callbacks: AudioProcessorCallbacks;
@@ -101,6 +103,13 @@ export class AudioStreamManager {
 
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       this.audioContext = new AudioCtx({ sampleRate: 16000 });
+      if (this.audioContext.state === 'suspended') {
+        try {
+          await this.audioContext.resume();
+        } catch {
+          // Will auto-resume on user gesture/loop
+        }
+      }
 
       const source = this.audioContext.createMediaStreamSource(this.mediaStream);
 
@@ -246,11 +255,14 @@ export class AudioStreamManager {
     });
   }
 
-  private scheduleRecognitionRestart(delayMs = 150) {
+  private scheduleRecognitionRestart(delayMs = 80) {
+    if (!this.isRunning || this.isPaused) return;
     if (this.recognitionRestartTimer) {
       clearTimeout(this.recognitionRestartTimer);
+      this.recognitionRestartTimer = null;
     }
     this.recognitionRestartTimer = setTimeout(() => {
+      this.recognitionRestartTimer = null;
       if (this.isRunning && !this.isPaused) {
         this.recreateSpeechRecognition();
       }
@@ -258,8 +270,15 @@ export class AudioStreamManager {
   }
 
   private recreateSpeechRecognition() {
+    if (!this.isRunning || this.isPaused) return;
+    if (this.isRestartingRecognition) return;
+    this.isRestartingRecognition = true;
+
     if (this.recognition) {
       try {
+        this.recognition.onstart = null;
+        this.recognition.onaudiostart = null;
+        this.recognition.onspeechstart = null;
         this.recognition.onresult = null;
         this.recognition.onerror = null;
         this.recognition.onend = null;
@@ -269,7 +288,14 @@ export class AudioStreamManager {
       }
       this.recognition = null;
     }
-    this.initSpeechRecognition();
+    this.isRecognitionActive = false;
+
+    setTimeout(() => {
+      this.isRestartingRecognition = false;
+      if (this.isRunning && !this.isPaused) {
+        this.initSpeechRecognition();
+      }
+    }, 40);
   }
 
   private initSpeechRecognition() {
@@ -285,9 +311,24 @@ export class AudioStreamManager {
       this.recognition = new SpeechRecognition();
       this.recognition.continuous = true;
       this.recognition.interimResults = true;
+      this.recognition.maxAlternatives = 1;
       this.recognition.lang = this.activeLanguage || 'en-IN'; // Multilingual ASR context
 
+      this.recognition.onstart = () => {
+        this.isRecognitionActive = true;
+        this.isRestartingRecognition = false;
+      };
+
+      this.recognition.onaudiostart = () => {
+        this.isRecognitionActive = true;
+      };
+
+      this.recognition.onspeechstart = () => {
+        this.lastVoiceActivityTime = Date.now();
+      };
+
       this.recognition.onresult = (event: any) => {
+        this.isRecognitionActive = true;
         this.lastTranscriptTime = Date.now();
         let interim = '';
         let final = '';
@@ -322,7 +363,7 @@ export class AudioStreamManager {
           this.pendingInterimText = trimmedInterim;
           this.callbacks.onTranscript(trimmedInterim, false);
 
-          // Fast 450ms commit timer: Minimizes stream lag while preventing truncated utterances
+          // Fast commit timer: Commits interim speech if user stops talking for >1000ms
           if (this.interimCommitTimer) {
             clearTimeout(this.interimCommitTimer);
           }
@@ -332,51 +373,46 @@ export class AudioStreamManager {
               this.pendingInterimText = '';
               this.callbacks.onTranscript(textToCommit, true);
             }
-          }, 450);
+          }, 1000);
         }
       };
 
       this.recognition.onerror = (e: any) => {
-        // 'no-speech' is NORMAL when user pauses - do NOT abort or destroy continuous recognizer!
-        if (e?.error === 'no-speech') {
+        const errType = e?.error;
+        // 'no-speech' is normal when user pauses momentarily
+        if (errType === 'no-speech' || errType === 'aborted') {
           return;
         }
-        if (e?.error === 'aborted') {
-          return;
+        console.warn("SpeechRecognition notice:", errType || e);
+        this.isRecognitionActive = false;
+        if (this.isRunning && !this.isPaused) {
+          this.scheduleRecognitionRestart(200);
         }
-        if (e?.error === 'network') {
-          // In sandboxed iframes or offline regional ASR, trigger immediate neural audio chunk fallback
-          console.warn("SpeechRecognition cloud network notice, activating neural chunk ASR fallback");
-          this.transcribeRecentAudioChunk();
-          this.scheduleRecognitionRestart(800);
-          return;
-        }
-        console.warn("SpeechRecognition notice:", e?.error || e);
-        this.scheduleRecognitionRestart(400);
       };
 
       this.recognition.onend = () => {
-        // Flush any pending text before restarting
+        this.isRecognitionActive = false;
+        // Flush any pending interim text before restarting
         if (this.pendingInterimText) {
           const textToCommit = this.pendingInterimText;
           this.pendingInterimText = '';
           this.callbacks.onTranscript(textToCommit, true);
         }
 
-        // If continuous recognition ends while listening is still active, smoothly restart
+        // If continuous recognition ends while listening is still active, cleanly recreate instance
         if (this.isRunning && !this.isPaused) {
-          try {
-            this.recognition.start();
-          } catch {
-            this.scheduleRecognitionRestart(300);
-          }
+          this.scheduleRecognitionRestart(60);
         }
       };
 
       this.recognition.start();
+      this.isRecognitionActive = true;
     } catch (err) {
       console.warn("Could not start SpeechRecognition:", err);
-      this.scheduleRecognitionRestart(400);
+      this.isRecognitionActive = false;
+      if (this.isRunning && !this.isPaused) {
+        this.scheduleRecognitionRestart(300);
+      }
     }
   }
 
@@ -398,22 +434,24 @@ export class AudioStreamManager {
       const normalizedVol = Math.min(avg / 128, 1);
       this.callbacks.onVolumeChange(normalizedVol);
 
-      // Sensitive voice activity detection (0.015 captures soft headphone/laptop speech)
       const now = performance.now();
       const wallNow = Date.now();
       if (normalizedVol > 0.015) {
         this.lastVoiceActivityTime = wallNow;
       }
 
-      // Anti-Idle & Keepalive Watchdog (runs every 1.5s)
-      if (now - lastWatchdogCheck > 1500) {
+      // Anti-Idle & Keepalive Watchdog (runs every 1.0s)
+      if (now - lastWatchdogCheck > 1000) {
         lastWatchdogCheck = now;
-        const speechActiveRecently = wallNow - this.lastVoiceActivityTime < 2200;
-        const speechStalled = wallNow - this.lastTranscriptTime > 3500;
 
-        // Keepalive: If recognition became dead/idle or stopped firing during active speech, resurrect it
-        if (speechStalled && this.isRunning && !this.isPaused && speechActiveRecently) {
-          this.scheduleRecognitionRestart(100);
+        // Auto-resume AudioContext if the browser suspended it
+        if (this.audioContext && this.audioContext.state === 'suspended') {
+          this.audioContext.resume().catch(() => {});
+        }
+
+        // Keepalive: If speech recognition died or went idle while streaming is active, resurrect immediately
+        if (!this.isRecognitionActive && !this.isRestartingRecognition && this.isRunning && !this.isPaused) {
+          this.scheduleRecognitionRestart(50);
         }
       }
 

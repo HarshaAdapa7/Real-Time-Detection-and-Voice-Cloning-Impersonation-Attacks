@@ -1306,7 +1306,7 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
               <span className="w-3 h-3 rounded-full bg-rose-500 animate-pulse" />
               <h2 className="text-lg font-bold tracking-tight">Live Microphone Voice Trust Firewall</h2>
               <span className="text-[11px] font-mono uppercase px-2 py-0.5 rounded-full bg-slate-800 text-indigo-300 border border-slate-700">
-                SIH Core Architecture
+                Live Stream Engine
               </span>
             </div>
             <p className="text-xs text-slate-400 max-w-2xl">
@@ -2337,7 +2337,7 @@ export const LiveVoiceIntelligence: React.FC<LiveVoiceIntelligenceProps> = ({
                 Evaluation Dataset Pipeline
               </h3>
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 font-semibold">
-                SIH Requirement
+                Continuous Ingestion
               </span>
             </div>
 

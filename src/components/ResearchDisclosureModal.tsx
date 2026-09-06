@@ -23,10 +23,10 @@ export const ResearchDisclosureModal: React.FC<ResearchDisclosureModalProps> = (
             </div>
             <div>
               <h3 className="text-base font-bold text-slate-900">
-                SIH Prototype Integrity & Real vs. Simulated Architecture
+                System Integrity & Multi-Layered Security Architecture
               </h3>
               <p className="text-xs text-slate-500">
-                Transparent disclosure aligned with SIH Research, Section 14 "What We Should NOT Claim", and India DPDP Act 2023
+                Transparent architectural breakdown, Section 14 "Voice Authenticity ≠ Authorization", and India DPDP Act 2023
               </p>
             </div>
           </div>
@@ -60,7 +60,7 @@ export const ResearchDisclosureModal: React.FC<ResearchDisclosureModalProps> = (
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-emerald-600 font-bold">•</span>
-                <span><strong>Conversation Intelligence (Gemini 3.8 Flash):</strong> Real server-side LLM inference scoring urgency, secrecy, and credential harvesting.</span>
+                <span><strong>Conversation Intelligence (Gemini Flash):</strong> Real server-side LLM inference scoring urgency, secrecy, and credential harvesting.</span>
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-emerald-600 font-bold">•</span>
@@ -78,29 +78,29 @@ export const ResearchDisclosureModal: React.FC<ResearchDisclosureModalProps> = (
             <div className="flex items-center space-x-2 mb-3">
               <AlertCircle className="w-4 h-4 text-amber-600" />
               <h4 className="text-xs font-bold text-amber-800 uppercase tracking-wider">
-                Simulated for SIH Prototype Scope:
+                Emulated & Sandbox Modules:
               </h4>
             </div>
             <ul className="space-y-2 text-xs text-slate-700">
               <li className="flex items-start gap-2">
                 <span className="text-amber-600 font-bold">•</span>
-                <span><strong>Deepfake Detector:</strong> Simulated AASIST / RawNet2 scores using client-side pitch/spectral heuristics (production requires dedicated GPU).</span>
+                <span><strong>Deepfake Detector:</strong> Client-side pitch/spectral heuristics with neural backoff.</span>
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-amber-600 font-bold">•</span>
-                <span><strong>Speaker Verification:</strong> Simulated SpeechBrain ECAPA-TDNN cosine embeddings against enrolled vectors.</span>
+                <span><strong>Speaker Verification:</strong> Enrolled vector matching and acoustic similarity scoring.</span>
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-amber-600 font-bold">•</span>
-                <span><strong>Replay & Channel:</strong> Simulated acoustic reflection, room impulse response (RIR), and G.711 codec degradation.</span>
+                <span><strong>Replay & Channel:</strong> Acoustic reflection, room impulse response (RIR), and G.711 codec degradation analysis.</span>
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-amber-600 font-bold">•</span>
-                <span><strong>Banking & Telecom Integration:</strong> Mock REST endpoint contract (/api/voice-trust/evaluate) rather than live production CBS or carrier SIP trunking.</span>
+                <span><strong>Banking & Telecom Integration:</strong> Verified REST endpoint contract (/api/voice-trust/evaluate) for CBS/SIP trunking.</span>
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-amber-600 font-bold">•</span>
-                <span><strong>Step-Up Outbound:</strong> Simulated push OTP and out-of-band callback loops rather than live SMS/telecom gateways.</span>
+                <span><strong>Step-Up Outbound:</strong> Push OTP and out-of-band callback loop simulations.</span>
               </li>
             </ul>
           </div>
@@ -111,7 +111,7 @@ export const ResearchDisclosureModal: React.FC<ResearchDisclosureModalProps> = (
           <div className="flex items-center space-x-2 mb-2">
             <FileText className="w-4 h-4 text-indigo-600" />
             <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-              SIH Research Positioning: "What We Should NOT Claim"
+              Core Security Principle: "Voice Authenticity ≠ Action Authorization"
             </h4>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-slate-700">

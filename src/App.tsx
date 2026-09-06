@@ -1,6 +1,6 @@
 /**
  * Real-Time Voice Trust Firewall
- * Lead Full-Stack Engineer Prototype for Smart India Hackathon (SIH)
+ * Enterprise Voice Security & Multimodal Context Defense
  *
  * Nine-Layer Architecture:
  * 1. Communication (Browser Mic / WebRTC)
@@ -182,6 +182,7 @@ export default function App() {
   // Audio Stream Manager ref
   const audioManagerRef = useRef<AudioStreamManager | null>(null);
   const scenarioPlayerRef = useRef<ScenarioAudioPlayer | null>(null);
+  const cumulativeTranscriptRef = useRef<string>('');
 
   // Toggle scenario audio playback so users can hear the conversation
   const handleToggleScenarioAudio = (scen: PreloadedScenario) => {
@@ -352,6 +353,9 @@ export default function App() {
       setAudioError(null);
       setChunkCount(0);
       setStepUpResolved(false);
+      cumulativeTranscriptRef.current = '';
+      setTranscript('');
+      setInterimTranscript('');
 
       const manager = new AudioStreamManager({
         onChunk: (features, count) => {
@@ -364,18 +368,16 @@ export default function App() {
         onTranscript: (liveText, isFinal) => {
           if (!liveText) return;
 
-          setInterimTranscript(liveText);
-
-          let cumulative = transcript;
+          let textToAnalyze = '';
           if (isFinal) {
-            cumulative = `${transcript} ${liveText}`.trim();
-            setTranscript(cumulative);
+            cumulativeTranscriptRef.current = `${cumulativeTranscriptRef.current} ${liveText}`.trim();
+            setTranscript(cumulativeTranscriptRef.current);
             setInterimTranscript('');
+            textToAnalyze = cumulativeTranscriptRef.current;
           } else {
-            cumulative = `${transcript} ${liveText}`.trim();
+            setInterimTranscript(liveText);
+            textToAnalyze = `${cumulativeTranscriptRef.current} ${liveText}`.trim();
           }
-
-          const textToAnalyze = cumulative || liveText;
 
           // 1. Dynamic Spoken Sector Classification from user input
           const sector = classifySpokenSector(textToAnalyze);
@@ -618,7 +620,7 @@ export default function App() {
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-4 ring-emerald-50 shrink-0" />
             <div className="text-xs">
               <span className="text-slate-700">
-                <strong className="text-slate-900">SIH Operational Framing: </strong>
+                <strong className="text-slate-900">Security Architecture: </strong>
                 Voice Authenticity ≠ Action Authorization. Fusing acoustic anti-spoofing signals with Gemini-powered intent and corporate context.
               </span>
             </div>
@@ -810,14 +812,14 @@ export default function App() {
       <footer className="bg-white border-t border-slate-200 py-4 text-slate-600 text-xs text-center">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
           <span>
-            Smart India Hackathon (SIH) Prototype • <strong className="text-slate-900">Real-Time Voice Trust Firewall</strong>
+            Enterprise Security • <strong className="text-slate-900">Real-Time Voice Trust Firewall</strong>
           </span>
           <div className="flex items-center space-x-4">
             <button
               onClick={() => setIsDisclosureModalOpen(true)}
               className="text-indigo-600 hover:text-indigo-800 font-medium hover:underline cursor-pointer"
             >
-              Real vs. Simulated Disclosures
+              Architecture & Security Framework
             </button>
             <span className="text-slate-300">•</span>
             <span className="text-slate-500 font-mono">India DPDP Act 2023 Minimal Logging</span>

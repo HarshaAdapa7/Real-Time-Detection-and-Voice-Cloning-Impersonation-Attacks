@@ -35,8 +35,8 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="flex items-center space-x-2">
               <h1 className="text-base sm:text-lg font-bold tracking-tight text-slate-900 flex items-center gap-2">
                 Real-Time Voice Trust Firewall
-                <span className="text-[10px] font-semibold tracking-wider uppercase px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
-                  SIH Prototype
+                <span className="text-[10px] font-semibold tracking-wider uppercase px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live Protection
                 </span>
               </h1>
             </div>

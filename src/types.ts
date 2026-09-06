@@ -1,6 +1,6 @@
 /**
  * Type definitions for Real-Time Voice Trust Firewall
- * Smart India Hackathon (SIH) Prototype
+ * Multi-Signal Voice Security Engine
  */
 
 export type TrustAction = 'ALLOW' | 'VERIFY' | 'PAUSE_ESCALATE' | 'BLOCK';

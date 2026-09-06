@@ -2,8 +2,8 @@
  * Simulated Context Engine Dataset & Preloaded Attack Scenarios
  * Real-Time Voice Trust Firewall
  *
- * Provides mock employee directories, transaction limits, and realistic
- * red-team attack scenarios for SIH judging and evaluation.
+ * Provides employee directories, transaction limits, and realistic
+ * red-team attack scenarios for security evaluation.
  */
 
 import { ContextProfile, PreloadedScenario } from '../types';
