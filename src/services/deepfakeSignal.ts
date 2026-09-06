@@ -13,57 +13,97 @@
 
 import { AudioFeatures, DeepfakeSignalResult } from '../types';
 
+export interface DeepfakeCalibrationConfig {
+  sensitivityBoost?: number; // 0 to 50 boost from fine-tuning
+  strictSyntheticCheck?: boolean;
+}
+
+let activeFineTunedCalibration: DeepfakeCalibrationConfig = {
+  sensitivityBoost: 0,
+  strictSyntheticCheck: false,
+};
+
+export function setDeepfakeCalibration(config: Partial<DeepfakeCalibrationConfig>) {
+  activeFineTunedCalibration = {
+    ...activeFineTunedCalibration,
+    ...config,
+  };
+}
+
+export function getDeepfakeCalibration(): DeepfakeCalibrationConfig {
+  return activeFineTunedCalibration;
+}
+
 export function computeDeepfakeSignal(
   features: AudioFeatures,
   scenarioBaseScore?: number,
   jitterSeed = 0,
-  isLiveMic = false
+  isLiveMic = false,
+  calibration?: DeepfakeCalibrationConfig
 ): DeepfakeSignalResult {
-  // If in live mic mode, compute purely from the microphone's real acoustic features
+  const activeConfig = calibration || activeFineTunedCalibration;
   let estimatedProbability: number;
 
   if (isLiveMic) {
     // Dynamic real-time biological voice analysis:
     // Natural human speech has pitch micro-tremor (pitchVariance ~ 0.18 - 0.50),
     // normal vocal fold spectral centroid (1200 - 2400 Hz), and dynamic energy.
-    // Neural TTS/vocoders exhibit unnatural prosodic flatness (pitchVariance < 0.12)
-    // or phase discontinuities with high spectral centroids (> 2800 Hz).
-    const isVoicing = features.rms > 0.02;
-    const isUnnaturallySmooth = features.pitchVariance < 0.12 && isVoicing;
-    const isHighSpectralCentroid = features.spectralCentroid > 2800;
-    const isZeroCrossingUniform = features.zeroCrossingRate > 0.38;
+    // Neural TTS/vocoders exhibit unnatural prosodic flatness (pitchVariance < 0.16)
+    // or phase discontinuities with high spectral centroids (> 2600 Hz).
+    const isVoicing = features.rms > 0.015;
+    const isUnnaturallySmooth = (features.pitchVariance < 0.16 || features.pitchVariance > 0.85) && isVoicing;
+    const isHighSpectralCentroid = features.spectralCentroid > 2600;
+    const isZeroCrossingUniform = features.zeroCrossingRate > 0.32;
+    const isLoudspeakerOrReplay = features.zeroCrossingRate > 0.40 && features.spectralCentroid > 2400;
 
     if (!isVoicing) {
       // Background / ambient silence
       estimatedProbability = 10;
     } else {
       let base = 12; // Natural human baseline
-      if (isUnnaturallySmooth) base += 45;
-      if (isHighSpectralCentroid) base += 25;
-      if (isZeroCrossingUniform) base += 15;
+      if (isUnnaturallySmooth) base += 48;
+      if (isHighSpectralCentroid) base += 28;
+      if (isZeroCrossingUniform) base += 18;
+      if (isLoudspeakerOrReplay) base += 22;
+
+      // Apply active fine-tuning sensitivity boost
+      if (activeConfig.sensitivityBoost) {
+        base += activeConfig.sensitivityBoost;
+      }
+      if (activeConfig.strictSyntheticCheck) {
+        base = Math.max(base, 78);
+      }
 
       // Small dynamic micro-variance based on real vocal fluctuation
       const dynamicFlux = Math.round(features.pitchVariance * 18 - 5);
-      estimatedProbability = Math.round(Math.min(Math.max(base + dynamicFlux, 4), 95));
+      estimatedProbability = Math.round(Math.min(Math.max(base + dynamicFlux, 5), 98));
     }
   } else if (scenarioBaseScore !== undefined) {
     // Inject small deterministic natural variance (±4%) based on real audio flux
     const naturalFlux = (features.pitchVariance * 10) % 8 - 4;
-    estimatedProbability = Math.min(Math.max(scenarioBaseScore + naturalFlux, 2), 99);
+    let score = scenarioBaseScore + naturalFlux;
+    if (activeConfig.sensitivityBoost && score > 40) {
+      score += activeConfig.sensitivityBoost;
+    }
+    estimatedProbability = Math.min(Math.max(score, 2), 99);
   } else {
     // Calculate heuristics from audio features:
-    const isUnnaturallySmooth = features.pitchVariance < 0.15 && features.rms > 0.05;
-    const isHighSpectralCentroid = features.spectralCentroid > 2800;
-    const isZeroCrossingUniform = features.zeroCrossingRate > 0.35;
+    const isUnnaturallySmooth = features.pitchVariance < 0.16 && features.rms > 0.03;
+    const isHighSpectralCentroid = features.spectralCentroid > 2600;
+    const isZeroCrossingUniform = features.zeroCrossingRate > 0.32;
 
     let base = 25; // baseline suspicion
-    if (isUnnaturallySmooth) base += 35;
-    if (isHighSpectralCentroid) base += 20;
-    if (isZeroCrossingUniform) base += 15;
+    if (isUnnaturallySmooth) base += 40;
+    if (isHighSpectralCentroid) base += 25;
+    if (isZeroCrossingUniform) base += 18;
+
+    if (activeConfig.sensitivityBoost) {
+      base += activeConfig.sensitivityBoost;
+    }
 
     // Add mild time-varying pseudo-random variation
     const variation = Math.sin(jitterSeed * 1.5) * 6;
-    estimatedProbability = Math.round(Math.min(Math.max(base + variation, 8), 95));
+    estimatedProbability = Math.round(Math.min(Math.max(base + variation, 8), 98));
   }
 
   const artifacts: string[] = [];

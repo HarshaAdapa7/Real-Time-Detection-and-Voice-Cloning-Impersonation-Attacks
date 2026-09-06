@@ -126,10 +126,10 @@ export function fuseRiskSignals(inputs: FusionInputs): RiskFusionResult {
   } else if (hasScamPretextEvidence) {
     finalRiskScore = Math.max(finalRiskScore, 82);
     circuitBreakerTriggered = '⚡ Pretext Security Circuit-Breaker: Utility disconnection / KYC urgency trope detected (Risk locked at 82% -> Immediate BLOCK)';
-  } else if (deepfakeScore >= 70) {
-    finalRiskScore = Math.max(finalRiskScore, 85);
-    circuitBreakerTriggered = `⚡ Acoustic Circuit-Breaker: High Synthetic Vocal Tract / Neural Vocoder detected (${deepfakeScore}% -> Immediate BLOCK)`;
-  } else if (replayScore >= 75) {
+  } else if (deepfakeScore >= 60 || (deepfakeScore >= 45 && replayScore >= 40) || (deepfakeScore >= 50 && speakerMismatchRisk >= 50)) {
+    finalRiskScore = Math.max(finalRiskScore, 88);
+    circuitBreakerTriggered = `⚡ Acoustic Circuit-Breaker: Synthetic Vocal Tract / Neural Vocoder / Replay Spoof detected (${deepfakeScore}% -> Immediate BLOCK)`;
+  } else if (replayScore >= 70) {
     finalRiskScore = Math.max(finalRiskScore, 82);
     circuitBreakerTriggered = `⚡ Acoustic Circuit-Breaker: High Loudspeaker Replay Channel Loop detected (${replayScore}% -> Immediate BLOCK)`;
   } else if (speakerMismatchRisk >= 65 && contextScore >= 40) {

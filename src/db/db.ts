@@ -971,7 +971,12 @@ export async function deleteLiveSession(sessionId: string): Promise<{ success: b
 // ============================================================
 
 export async function saveLiveCaption(caption: LiveCaptionRecord): Promise<{ success: boolean; caption: LiveCaptionRecord }> {
-  inMemoryLiveCaptions.push(caption);
+  const existingIdx = inMemoryLiveCaptions.findIndex((c) => c.caption_id === caption.caption_id);
+  if (existingIdx >= 0) {
+    inMemoryLiveCaptions[existingIdx] = { ...inMemoryLiveCaptions[existingIdx], ...caption };
+  } else {
+    inMemoryLiveCaptions.push(caption);
+  }
 
   const p = getDbPool();
   if (p) {
@@ -982,6 +987,10 @@ export async function saveLiveCaption(caption: LiveCaptionRecord): Promise<{ suc
         await client.query(`
           INSERT INTO live_captions (caption_id, session_id, turn_number, timestamp, transcript, detected_language, caption_status)
           VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT (caption_id) DO UPDATE SET
+            transcript = EXCLUDED.transcript,
+            detected_language = EXCLUDED.detected_language,
+            caption_status = EXCLUDED.caption_status;
         `, [
           caption.caption_id,
           caption.session_id,
@@ -1017,6 +1026,7 @@ export async function saveAnalysisResult(analysis: AnalysisResultRecord): Promis
             replay_score, nlp_score, context, previous_context, context_switch,
             language_switch, risk_score, decision, timestamp
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          ON CONFLICT (id) DO NOTHING;
         `, [
           `an-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
           analysis.session_id,
@@ -1045,7 +1055,12 @@ export async function saveAnalysisResult(analysis: AnalysisResultRecord): Promis
 }
 
 export async function saveAudioRecord(record: AudioRecord): Promise<{ success: boolean; record: AudioRecord }> {
-  inMemoryAudioRecords.push(record);
+  const existingIdx = inMemoryAudioRecords.findIndex((r) => r.audio_id === record.audio_id);
+  if (existingIdx >= 0) {
+    inMemoryAudioRecords[existingIdx] = { ...inMemoryAudioRecords[existingIdx], ...record };
+  } else {
+    inMemoryAudioRecords.push(record);
+  }
 
   const p = getDbPool();
   if (p) {
@@ -1058,6 +1073,15 @@ export async function saveAudioRecord(record: AudioRecord): Promise<{ success: b
             audio_id, session_id, audio_file_path, chunk_number,
             start_timestamp, end_timestamp, duration, sample_rate, format, source
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          ON CONFLICT (audio_id) DO UPDATE SET
+            audio_file_path = EXCLUDED.audio_file_path,
+            chunk_number = EXCLUDED.chunk_number,
+            start_timestamp = EXCLUDED.start_timestamp,
+            end_timestamp = EXCLUDED.end_timestamp,
+            duration = EXCLUDED.duration,
+            sample_rate = EXCLUDED.sample_rate,
+            format = EXCLUDED.format,
+            source = EXCLUDED.source;
         `, [
           record.audio_id,
           record.session_id,

@@ -39,6 +39,7 @@ export class AudioStreamManager {
   private interimCommitTimer: any = null;
   private recognitionRestartTimer: any = null;
   private speechWatchdogTimer: any = null;
+  private recognitionSessionStartTime = Date.now();
   private lastVoiceActivityTime = 0;
   private lastTranscriptTime = Date.now();
   private isTranscribingChunk = false;
@@ -183,7 +184,8 @@ export class AudioStreamManager {
         if (event.data && event.data.size > 0) {
           this.recordedChunks.push(event.data);
           this.recentAudioSlices.push(event.data);
-          if (this.recentAudioSlices.length > 2) {
+          // Keep up to 6 slices (15 seconds of rich rolling audio history)
+          if (this.recentAudioSlices.length > 6) {
             this.recentAudioSlices.shift();
           }
           if (this.callbacks.onAudioChunkReady) {
@@ -198,7 +200,7 @@ export class AudioStreamManager {
         }
       };
 
-      // Slice recording every 2.5s
+      // Slice recording every 2.5s for continuous telemetry and database persistence
       this.mediaRecorder.start(2500);
     } catch (recErr) {
       console.warn("MediaRecorder could not start (will proceed with audio analysis):", recErr);
@@ -225,6 +227,8 @@ export class AudioStreamManager {
 
   public resumeMicrophone() {
     this.isPaused = false;
+    this.recognitionSessionStartTime = Date.now();
+    this.lastTranscriptTime = Date.now();
     if (this.mediaRecorder && this.mediaRecorder.state === 'paused') {
       try {
         this.mediaRecorder.resume();
@@ -263,7 +267,7 @@ export class AudioStreamManager {
     });
   }
 
-  private scheduleRecognitionRestart(delayMs = 80) {
+  private scheduleRecognitionRestart(delayMs = 50) {
     if (!this.isRunning || this.isPaused) return;
     if (this.recognitionRestartTimer) {
       clearTimeout(this.recognitionRestartTimer);
@@ -303,7 +307,7 @@ export class AudioStreamManager {
       if (this.isRunning && !this.isPaused) {
         this.initSpeechRecognition();
       }
-    }, 40);
+    }, 30);
   }
 
   private initSpeechRecognition() {
@@ -311,7 +315,8 @@ export class AudioStreamManager {
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      console.warn("SpeechRecognition not natively supported in this browser. Fallback typing enabled.");
+      console.warn("SpeechRecognition not natively supported in this browser. Neural ASR fallback will be used.");
+      this.isRecognitionActive = false;
       return;
     }
 
@@ -320,11 +325,17 @@ export class AudioStreamManager {
       this.recognition.continuous = true;
       this.recognition.interimResults = true;
       this.recognition.maxAlternatives = 1;
-      this.recognition.lang = this.activeLanguage || 'en-IN'; // Multilingual ASR context
+      // Valid BCP-47 language tag
+      const langToUse = this.activeLanguage && this.activeLanguage !== 'auto' 
+        ? this.activeLanguage 
+        : 'en-IN';
+      this.recognition.lang = langToUse;
 
       this.recognition.onstart = () => {
         this.isRecognitionActive = true;
         this.isRestartingRecognition = false;
+        this.recognitionSessionStartTime = Date.now();
+        this.lastTranscriptTime = Date.now();
       };
 
       this.recognition.onaudiostart = () => {
@@ -332,6 +343,7 @@ export class AudioStreamManager {
       };
 
       this.recognition.onspeechstart = () => {
+        this.isRecognitionActive = true;
         this.lastVoiceActivityTime = Date.now();
       };
 
@@ -371,7 +383,7 @@ export class AudioStreamManager {
           this.pendingInterimText = trimmedInterim;
           this.callbacks.onTranscript(trimmedInterim, false);
 
-          // Fast commit timer: Commits interim speech if user stops talking for >1000ms
+          // Fast commit timer: Commits interim speech if speaker finishes utterance
           if (this.interimCommitTimer) {
             clearTimeout(this.interimCommitTimer);
           }
@@ -381,20 +393,19 @@ export class AudioStreamManager {
               this.pendingInterimText = '';
               this.callbacks.onTranscript(textToCommit, true);
             }
-          }, 1000);
+          }, 850);
         }
       };
 
       this.recognition.onerror = (e: any) => {
         const errType = e?.error;
-        // 'no-speech' is normal when user pauses momentarily
         if (errType === 'no-speech' || errType === 'aborted') {
           return;
         }
         console.warn("SpeechRecognition notice:", errType || e);
         this.isRecognitionActive = false;
-        if (this.isRunning && !this.isPaused) {
-          this.scheduleRecognitionRestart(200);
+        if (this.isRunning && !this.isPaused && !this.isRestartingRecognition) {
+          this.scheduleRecognitionRestart(150);
         }
       };
 
@@ -407,9 +418,9 @@ export class AudioStreamManager {
           this.callbacks.onTranscript(textToCommit, true);
         }
 
-        // If continuous recognition ends while listening is still active, cleanly recreate instance
-        if (this.isRunning && !this.isPaused) {
-          this.scheduleRecognitionRestart(60);
+        // If continuous recognition ends while listening is still active, cleanly recreate instance instantly
+        if (this.isRunning && !this.isPaused && !this.isRestartingRecognition) {
+          this.scheduleRecognitionRestart(40);
         }
       };
 
@@ -418,8 +429,8 @@ export class AudioStreamManager {
     } catch (err) {
       console.warn("Could not start SpeechRecognition:", err);
       this.isRecognitionActive = false;
-      if (this.isRunning && !this.isPaused) {
-        this.scheduleRecognitionRestart(300);
+      if (this.isRunning && !this.isPaused && !this.isRestartingRecognition) {
+        this.scheduleRecognitionRestart(200);
       }
     }
   }
@@ -444,25 +455,46 @@ export class AudioStreamManager {
 
       const now = performance.now();
       const wallNow = Date.now();
-      if (normalizedVol > 0.005) {
+      if (normalizedVol > 0.02) {
         this.lastVoiceActivityTime = wallNow;
       }
 
-      // Anti-Idle & Keepalive Watchdog (runs every 800ms)
-      if (now - lastWatchdogCheck > 800) {
+      // Safe High-Performance Watchdog check (runs every 600ms)
+      if (now - lastWatchdogCheck > 600) {
         lastWatchdogCheck = now;
 
-        // Auto-resume AudioContext if the browser suspended it
+        // 1. Auto-resume AudioContext if browser suspended it
         if (this.audioContext && this.audioContext.state === 'suspended') {
           this.audioContext.resume().catch(() => {});
         }
 
-        // Keepalive & Anti-Stall: If speech recognition died or went silent during speaking, resurrect immediately
-        const isVoiceActiveRecently = wallNow - this.lastVoiceActivityTime < 3500;
-        const timeSinceLastTranscript = wallNow - this.lastTranscriptTime;
-
+        // 2. Dead-instance recovery: If recognition is not active, restart it immediately
         if (
-          (!this.isRecognitionActive || (isVoiceActiveRecently && timeSinceLastTranscript > 4000)) &&
+          !this.isRecognitionActive &&
+          !this.isRestartingRecognition &&
+          this.isRunning &&
+          !this.isPaused
+        ) {
+          this.scheduleRecognitionRestart(50);
+        }
+
+        // 3. Proactive 16s Keepalive Cycling to beat Chromium 20s continuous socket timeout:
+        // When session exceeds 16 seconds and no uncommitted speech is ongoing, smoothly recycle instance
+        const sessionAge = wallNow - this.recognitionSessionStartTime;
+        if (
+          sessionAge > 16000 &&
+          !this.pendingInterimText &&
+          !this.isRestartingRecognition &&
+          this.isRunning &&
+          !this.isPaused
+        ) {
+          this.scheduleRecognitionRestart(30);
+        }
+
+        // 4. Voice activity stall recovery: If speaker is talking (vol > 0.03) but no transcript received for > 5s
+        if (
+          normalizedVol > 0.03 &&
+          wallNow - this.lastTranscriptTime > 5000 &&
           !this.isRestartingRecognition &&
           this.isRunning &&
           !this.isPaused
