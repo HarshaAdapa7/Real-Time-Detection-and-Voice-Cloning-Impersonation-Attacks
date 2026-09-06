@@ -42,6 +42,8 @@ export class AudioStreamManager {
   private lastVoiceActivityTime = 0;
   private lastTranscriptTime = Date.now();
   private isTranscribingChunk = false;
+  private savedSessionBlob: Blob | null = null;
+  private savedSessionDataUrl: string = '';
 
   constructor(callbacks: AudioProcessorCallbacks) {
     this.callbacks = callbacks;
@@ -115,14 +117,14 @@ export class AudioStreamManager {
 
       // Pre-amplifier and DynamicsCompressor for enhanced listening sensitivity & clarity
       const gainNode = this.audioContext.createGain();
-      gainNode.gain.setValueAtTime(1.8, this.audioContext.currentTime);
+      gainNode.gain.setValueAtTime(2.5, this.audioContext.currentTime);
 
       const compressor = this.audioContext.createDynamicsCompressor();
-      compressor.threshold.setValueAtTime(-24, this.audioContext.currentTime);
-      compressor.knee.setValueAtTime(30, this.audioContext.currentTime);
-      compressor.ratio.setValueAtTime(12, this.audioContext.currentTime);
-      compressor.attack.setValueAtTime(0.003, this.audioContext.currentTime);
-      compressor.release.setValueAtTime(0.25, this.audioContext.currentTime);
+      compressor.threshold.setValueAtTime(-28, this.audioContext.currentTime);
+      compressor.knee.setValueAtTime(24, this.audioContext.currentTime);
+      compressor.ratio.setValueAtTime(8, this.audioContext.currentTime);
+      compressor.attack.setValueAtTime(0.002, this.audioContext.currentTime);
+      compressor.release.setValueAtTime(0.2, this.audioContext.currentTime);
 
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = 1024;
@@ -240,17 +242,23 @@ export class AudioStreamManager {
   }
 
   public getRecordedBlob(): Blob | null {
+    if (this.savedSessionBlob) return this.savedSessionBlob;
     if (this.recordedChunks.length === 0) return null;
     const type = this.recordedChunks[0]?.type || 'audio/webm';
     return new Blob(this.recordedChunks, { type });
   }
 
   public async getRecordedAudioDataUrl(): Promise<string> {
+    if (this.savedSessionDataUrl) return this.savedSessionDataUrl;
     const blob = this.getRecordedBlob();
     if (!blob) return '';
     return new Promise((resolve) => {
       const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result as string);
+      reader.onloadend = () => {
+        const result = (reader.result as string) || '';
+        this.savedSessionDataUrl = result;
+        resolve(result);
+      };
       reader.readAsDataURL(blob);
     });
   }
@@ -436,12 +444,12 @@ export class AudioStreamManager {
 
       const now = performance.now();
       const wallNow = Date.now();
-      if (normalizedVol > 0.015) {
+      if (normalizedVol > 0.005) {
         this.lastVoiceActivityTime = wallNow;
       }
 
-      // Anti-Idle & Keepalive Watchdog (runs every 1.0s)
-      if (now - lastWatchdogCheck > 1000) {
+      // Anti-Idle & Keepalive Watchdog (runs every 800ms)
+      if (now - lastWatchdogCheck > 800) {
         lastWatchdogCheck = now;
 
         // Auto-resume AudioContext if the browser suspended it
@@ -449,9 +457,17 @@ export class AudioStreamManager {
           this.audioContext.resume().catch(() => {});
         }
 
-        // Keepalive: If speech recognition died or went idle while streaming is active, resurrect immediately
-        if (!this.isRecognitionActive && !this.isRestartingRecognition && this.isRunning && !this.isPaused) {
-          this.scheduleRecognitionRestart(50);
+        // Keepalive & Anti-Stall: If speech recognition died or went silent during speaking, resurrect immediately
+        const isVoiceActiveRecently = wallNow - this.lastVoiceActivityTime < 3500;
+        const timeSinceLastTranscript = wallNow - this.lastTranscriptTime;
+
+        if (
+          (!this.isRecognitionActive || (isVoiceActiveRecently && timeSinceLastTranscript > 4000)) &&
+          !this.isRestartingRecognition &&
+          this.isRunning &&
+          !this.isPaused
+        ) {
+          this.scheduleRecognitionRestart(40);
         }
       }
 
@@ -647,12 +663,21 @@ export class AudioStreamManager {
     }
     if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
       try {
+        if (this.mediaRecorder.state === 'recording') {
+          this.mediaRecorder.requestData();
+        }
         this.mediaRecorder.stop();
       } catch (e) {
         // Ignored
       }
       this.mediaRecorder = null;
     }
+
+    if (this.recordedChunks.length > 0) {
+      const type = this.recordedChunks[0]?.type || 'audio/webm';
+      this.savedSessionBlob = new Blob(this.recordedChunks, { type });
+    }
+
     this.recentAudioSlices = [];
     if (this.recognition) {
       try {

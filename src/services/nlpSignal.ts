@@ -63,7 +63,17 @@ export function evaluateTextHeuristics(transcript: string): NlpSignalResult {
     /(it security|cfo|ceo|director|cyber cell|security department|bank manager|police inspector|enforcement officer|compliance officer|headquarters|सीईओ|सीएफओ|प्रबंधक|పోలీస్|మేనేజర్|అధికారి|இயக்குனர்|அதிகாரி|ಅಧಿಕಾರಿ)/i;
   const hasAuthority = authorityPattern.test(text) || authorityPattern.test(textLower);
 
-  // 7. Call Merging & Conference Bridge Hijack Scam (New Attack Vector Mandate)
+  // 7. Remote Access Trojans / Screen Sharing / Malware APKs
+  const remoteAccessPattern =
+    /(anydesk|teamviewer|rustdesk|quicksupport|apk|download app|screen share|install this app|click on link|remote access|screenshare|apk download|स्क्रीन शेयर|डाउनलोड|యాప్|లింక్|உதவி செயலி)/i;
+  const hasRemoteAccess = remoteAccessPattern.test(text) || remoteAccessPattern.test(textLower);
+
+  // 8. Scam Pretext Tropes (Utility Disconnection, Expired KYC, Lottery Tax, Task Scam)
+  const scamPretextPattern =
+    /(electricity bill|power disconnected|power cut|kyc update|kyc expire|aadhaar link|pan card blocked|credit card points|lottery winner|telegram task|part-time job|loan approved|processing fee|refund voucher|पॉवर कट|बिजली बिल|केवाईसी|लॉटरी|టాస్క్ జాబ్)/i;
+  const hasScamPretext = scamPretextPattern.test(text) || scamPretextPattern.test(textLower);
+
+  // 9. Call Merging & Conference Bridge Hijack Scam (New Attack Vector Mandate)
   const callMergePattern =
     /(call merge|merging call|merge the call|merge this call|conference call|conference bridge|bridge the call|put on conference|add to conference|conferencing in|connecting third party|dialing supervisor|patching in|senior officer on line|merge another call|add another call|\*21\*|\*401\*|\*\*21\*|call forwarding|కాల్ మెర్జ్|కాన్ఫరెన్స్ కాల్|కాల్ కలుపుతున్నాను|మరొక అధికారిని కలుపుతాను|సీనియర్ మేనేజర్ ను కాన్ఫరెన్స్|కాల్ ఫార్వర్డ్|కాల్ జోడించండి|కాల్ మెర్జ్ చేయండి|कॉल मर्ज|कॉन्फ्रेंस कॉल|कॉल जोड़ रहा हूँ|सीनियर ऑफिसर को लाइन पर ले रहा हूँ|कॉन्फ्रेंस पर जोड़ें|कॉल फॉरवर्ड करें|कॉल मर्ज करो|कॉल जोड़ो|கால் மெர்ஜ்|கான்பரன்ஸ் கால்|ಕಾಲ್ ಮರ್ಜ್|ಕಾನ್ಫರೆನ್ಸ್ ಕಾಲ್|call merge kar raha|conference par le raha|call merge cheyyandi|conference lo pettandi|call kaluputunnanu)/i;
   const hasCallMerge = callMergePattern.test(text) || callMergePattern.test(textLower);
@@ -80,6 +90,12 @@ export function evaluateTextHeuristics(transcript: string): NlpSignalResult {
   } else if (hasDigitalArrest) {
     score = 92;
     cues.push("🚨 P0 CRITICAL: Law Enforcement / Digital Arrest Extortion & Arrest Threat detected");
+  } else if (hasRemoteAccess) {
+    score = 90;
+    cues.push("🚨 P0 CRITICAL: Remote access tool / Malicious APK download solicitation detected");
+  } else if (hasScamPretext) {
+    score = 84;
+    cues.push("⚠️ SCAM PRETEXT: Utility cut, KYC expiration, or fraudulent financial trope detected");
   } else if (hasFinancial && hasUrgency) {
     score = 90;
     cues.push("🚨 P0 CRITICAL: High-Urgency Coercive Financial Wire / Account Transfer demand");

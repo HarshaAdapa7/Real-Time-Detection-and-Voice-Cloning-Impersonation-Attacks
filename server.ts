@@ -160,10 +160,17 @@ Transcript to inspect:
 "${transcript}"
 
 Evaluate whether this conversation exhibits social-engineering fraud indicators:
-1. Urgency (artificial time limits, emotional distress, emergency claims).
-2. Secrecy (demanding the victim not verify, keep off official channels, bypass standard callback).
-3. Financial / Credential requests (wire transfers, OTP, PIN, password, beneficiary additions).
-4. Overall social engineering risk score from 0 (completely benign) to 100 (severe attack).`;
+1. Urgency & Coercion (artificial time limits, emotional distress, emergency claims, disconnection warnings).
+2. Secrecy & Isolation (demanding the victim not verify, keep off official channels, stay in room, avoid hanging up).
+3. Financial / Credential requests (wire transfers, RTGS, UPI, OTP, PIN, password, beneficiary additions).
+4. Unauthorized Call Merging / Conference Bridge Hijacking (asking to add 3rd party, *21* / *401* codes, dialing supervisor into call).
+5. Law Enforcement / Digital Arrest (police, CBI, customs, arrest threats, seizure warrants).
+6. Remote Access & APK Trojans (AnyDesk, TeamViewer, QuickSupport, installing unknown apps).
+7. Scam Pretexts (electricity bill power cut, KYC expiry, lottery winnings, part-time job deposit).
+
+Risk Calibration:
+- Assign >= 85-98 for active fraud attacks (OTP demands, Digital Arrest threats, Call Merging hijack, Urgent Wire exfiltration, Remote Access).
+- Assign <= 25 for benign operational discussions, friendly greetings, or standard inquiries.`;
 
     // Multi-model resilience: attempt high-availability models with schema enforcement
     const modelsToAttempt = ["gemini-flash-lite-latest", "gemini-3.6-flash", "gemini-3.8-flash"];
